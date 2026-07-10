@@ -10,11 +10,14 @@ import {
   ChevronLeft,
   ChevronRight,
   PanelLeft,
-  GripVertical
+  GripVertical,
+  Phone,
+  Mail,
+  BadgeCheck
 } from "lucide-react";
 import "./styles.css";
 
-const STORAGE_KEY = "job-scheduler-calendar-buckets-v1";
+const STORAGE_KEY = "job-scheduler-calendar-buckets-v2";
 
 const CATEGORIES = [
   "To be scheduled",
@@ -24,12 +27,56 @@ const CATEGORIES = [
   "Completed"
 ];
 
+const ROSTER_PATTERNS = [
+  { id: "NONE", label: "No roster pattern", onDays: 0, offDays: 0 },
+  { id: "5_ON_2_OFF", label: "5 days on / 2 off", onDays: 5, offDays: 2 },
+  { id: "8_ON_6_OFF", label: "8 days on / 6 off", onDays: 8, offDays: 6 },
+  { id: "14_ON_7_OFF", label: "2 weeks on / 1 off", onDays: 14, offDays: 7 },
+  { id: "14_ON_14_OFF", label: "2 weeks on / 2 off", onDays: 14, offDays: 14 }
+];
+
 const initialData = {
   teamMembers: [
-    { id: "gary", name: "Gary", role: "Supervisor" },
-    { id: "mick", name: "Mick", role: "Carpentry" },
-    { id: "drew", name: "Drew", role: "Plumbing" },
-    { id: "gaz", name: "Gaz", role: "Electrical" }
+    {
+      id: "gary",
+      name: "Gary",
+      role: "Supervisor",
+      phone: "0400 000 000",
+      email: "gary@example.com",
+      employeeNumber: "EMP001",
+      rosterPattern: "5_ON_2_OFF",
+      rosterStartDate: getIsoDate(new Date())
+    },
+    {
+      id: "mick",
+      name: "Mick",
+      role: "Carpentry",
+      phone: "",
+      email: "",
+      employeeNumber: "EMP002",
+      rosterPattern: "8_ON_6_OFF",
+      rosterStartDate: getIsoDate(new Date())
+    },
+    {
+      id: "drew",
+      name: "Drew",
+      role: "Plumbing",
+      phone: "",
+      email: "",
+      employeeNumber: "EMP003",
+      rosterPattern: "14_ON_7_OFF",
+      rosterStartDate: getIsoDate(new Date())
+    },
+    {
+      id: "gaz",
+      name: "Gaz",
+      role: "Electrical",
+      phone: "",
+      email: "",
+      employeeNumber: "EMP004",
+      rosterPattern: "14_ON_14_OFF",
+      rosterStartDate: getIsoDate(new Date())
+    }
   ],
   jobs: [
     {
@@ -76,6 +123,7 @@ function App() {
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("All");
   const [editingJob, setEditingJob] = useState(null);
+  const [editingWorker, setEditingWorker] = useState(null);
   const [draggedJobId, setDraggedJobId] = useState(null);
   const [weekStart, setWeekStart] = useState(getStartOfWeek(new Date()));
 
@@ -156,6 +204,23 @@ function App() {
 
     updateData({ ...data, jobs: nextJobs });
     setEditingJob(null);
+  }
+
+  function saveWorker(workerToSave) {
+    const normalised = {
+      ...workerToSave,
+      rosterPattern: workerToSave.rosterPattern || "NONE",
+      rosterStartDate: workerToSave.rosterStartDate || ""
+    };
+
+    const exists = data.teamMembers.some((w) => w.id === normalised.id);
+
+    const nextWorkers = exists
+      ? data.teamMembers.map((w) => (w.id === normalised.id ? normalised : w))
+      : [...data.teamMembers, normalised];
+
+    updateData({ ...data, teamMembers: nextWorkers });
+    setEditingWorker(null);
   }
 
   function deleteJob(jobId) {
@@ -252,16 +317,7 @@ function App() {
   }
 
   function addTeamMember() {
-    const name = prompt("Worker name:");
-    if (!name) return;
-
-    const id =
-      name.toLowerCase().replace(/[^a-z0-9]+/g, "-") + "-" + Date.now();
-
-    updateData({
-      ...data,
-      teamMembers: [...data.teamMembers, { id, name, role: "" }]
-    });
+    setEditingWorker(emptyWorker());
   }
 
   function removeTeamMember(memberId) {
@@ -427,9 +483,8 @@ function App() {
           <div className="calendar-instructions">
             <strong>Calendar</strong>
             <span>
-              Drag a job onto a worker/date. Use the right edge handle on a
-              scheduled job to extend it across multiple days. Drop a scheduled
-              job onto another worker row to add that worker.
+              Click a worker name to view or edit their details. Calendar cells
+              show whether each worker is Onsite or RNR based on their roster.
             </span>
           </div>
 
@@ -473,10 +528,17 @@ function App() {
                       setDraggedJobId(null);
                     }}
                   >
-                    <div>
+                    <button
+                      className="worker-profile-button"
+                      onClick={() => setEditingWorker(member)}
+                      title="View or edit worker"
+                    >
                       <strong>{member.name}</strong>
                       <span>{member.role || "Team member"}</span>
-                    </div>
+                      {member.employeeNumber && (
+                        <em>{member.employeeNumber}</em>
+                      )}
+                    </button>
 
                     <button
                       title="Remove worker"
@@ -488,6 +550,7 @@ function App() {
 
                   {days.map((day) => {
                     const iso = getIsoDate(day);
+                    const rosterStatus = getRosterStatus(member, iso);
 
                     const cellJobs = scheduledJobs.filter(
                       (job) =>
@@ -501,7 +564,7 @@ function App() {
                         key={`${member.id}-${iso}`}
                         className={`calendar-cell ${
                           isToday(day) ? "today-cell" : ""
-                        }`}
+                        } ${rosterStatus === "RNR" ? "rnr-cell" : "onsite-cell"}`}
                         onDragOver={(e) => {
                           e.preventDefault();
                           e.dataTransfer.dropEffect = "move";
@@ -519,6 +582,14 @@ function App() {
                           setDraggedJobId(null);
                         }}
                       >
+                        <div
+                          className={`roster-badge ${
+                            rosterStatus === "RNR" ? "rnr" : "onsite"
+                          }`}
+                        >
+                          {rosterStatus}
+                        </div>
+
                         <button
                           className="add-cell-job"
                           onClick={() =>
@@ -578,6 +649,14 @@ function App() {
           teamMembers={data.teamMembers}
           onClose={() => setEditingJob(null)}
           onSave={saveJob}
+        />
+      )}
+
+      {editingWorker && (
+        <WorkerModal
+          worker={editingWorker}
+          onClose={() => setEditingWorker(null)}
+          onSave={saveWorker}
         />
       )}
     </div>
@@ -851,6 +930,119 @@ function JobModal({ job, teamMembers, onClose, onSave }) {
   );
 }
 
+function WorkerModal({ worker, onClose, onSave }) {
+  const [form, setForm] = useState(worker);
+
+  function update(field, value) {
+    setForm({ ...form, [field]: value });
+  }
+
+  function submit(e) {
+    e.preventDefault();
+
+    if (!form.name.trim()) {
+      alert("Please enter a worker name.");
+      return;
+    }
+
+    onSave(form);
+  }
+
+  return (
+    <div className="modal-backdrop">
+      <form className="modal worker-modal" onSubmit={submit}>
+        <div className="modal-header">
+          <h2>Worker profile</h2>
+          <button type="button" className="icon" onClick={onClose}>
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="two-col">
+          <label>
+            Name
+            <input value={form.name} onChange={(e) => update("name", e.target.value)} />
+          </label>
+
+          <label>
+            Role / trade
+            <input value={form.role} onChange={(e) => update("role", e.target.value)} />
+          </label>
+        </div>
+
+        <div className="two-col">
+          <label>
+            Contact number
+            <input value={form.phone} onChange={(e) => update("phone", e.target.value)} />
+          </label>
+
+          <label>
+            Email
+            <input value={form.email} onChange={(e) => update("email", e.target.value)} />
+          </label>
+        </div>
+
+        <label>
+          Employee number
+          <input
+            value={form.employeeNumber}
+            onChange={(e) => update("employeeNumber", e.target.value)}
+          />
+        </label>
+
+        <div className="two-col">
+          <label>
+            Roster pattern
+            <select
+              value={form.rosterPattern || "NONE"}
+              onChange={(e) => update("rosterPattern", e.target.value)}
+            >
+              {ROSTER_PATTERNS.map((pattern) => (
+                <option key={pattern.id} value={pattern.id}>
+                  {pattern.label}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          <label>
+            Roster start date
+            <input
+              type="date"
+              value={form.rosterStartDate || ""}
+              onChange={(e) => update("rosterStartDate", e.target.value)}
+            />
+          </label>
+        </div>
+
+        <div className="worker-summary">
+          <div>
+            <Phone size={15} />
+            <span>{form.phone || "No phone number entered"}</span>
+          </div>
+          <div>
+            <Mail size={15} />
+            <span>{form.email || "No email entered"}</span>
+          </div>
+          <div>
+            <BadgeCheck size={15} />
+            <span>{form.employeeNumber || "No employee number entered"}</span>
+          </div>
+        </div>
+
+        <div className="modal-actions">
+          <button type="button" className="secondary" onClick={onClose}>
+            Cancel
+          </button>
+          <button type="submit" className="primary">
+            Save worker
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
 function emptyJob(defaults = {}) {
   const start = defaults.startDate ?? "";
 
@@ -869,10 +1061,39 @@ function emptyJob(defaults = {}) {
   };
 }
 
+function emptyWorker() {
+  const id = "worker-" + crypto.randomUUID();
+
+  return {
+    id,
+    name: "",
+    role: "",
+    phone: "",
+    email: "",
+    employeeNumber: "",
+    rosterPattern: "NONE",
+    rosterStartDate: ""
+  };
+}
+
 function loadData() {
   try {
     const saved = localStorage.getItem(STORAGE_KEY);
-    return saved ? JSON.parse(saved) : initialData;
+    if (!saved) return initialData;
+
+    const parsed = JSON.parse(saved);
+
+    return {
+      ...parsed,
+      teamMembers: parsed.teamMembers.map((worker) => ({
+        phone: "",
+        email: "",
+        employeeNumber: "",
+        rosterPattern: "NONE",
+        rosterStartDate: "",
+        ...worker
+      }))
+    };
   } catch {
     return initialData;
   }
@@ -906,6 +1127,29 @@ function getIsoDate(date) {
   const day = String(copy.getDate()).padStart(2, "0");
 
   return `${year}-${month}-${day}`;
+}
+
+function daysBetween(startDate, targetDate) {
+  const start = new Date(startDate + "T00:00:00");
+  const target = new Date(targetDate + "T00:00:00");
+
+  const msPerDay = 24 * 60 * 60 * 1000;
+  return Math.floor((target - start) / msPerDay);
+}
+
+function getRosterStatus(worker, isoDate) {
+  if (!worker.rosterPattern || worker.rosterPattern === "NONE") return "Onsite";
+  if (!worker.rosterStartDate) return "Onsite";
+
+  const pattern = ROSTER_PATTERNS.find((p) => p.id === worker.rosterPattern);
+  if (!pattern || !pattern.onDays || !pattern.offDays) return "Onsite";
+
+  const cycleLength = pattern.onDays + pattern.offDays;
+  const difference = daysBetween(worker.rosterStartDate, isoDate);
+
+  const dayInCycle = ((difference % cycleLength) + cycleLength) % cycleLength;
+
+  return dayInCycle < pattern.onDays ? "Onsite" : "RNR";
 }
 
 function formatDayName(date) {
