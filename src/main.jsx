@@ -83,8 +83,6 @@ function App() {
     return Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
   }, [weekStart]);
 
-  // Search applies to both the bucket list and calendar.
-  // Category filter only applies to the bucket list, so scheduled jobs do not disappear from the calendar.
   const searchMatchedJobs = useMemo(() => {
     const q = query.trim().toLowerCase();
 
@@ -127,6 +125,16 @@ function App() {
     saveData(next);
   }
 
+  function getDraggedJobId(e) {
+    return e.dataTransfer.getData("text/plain") || draggedJobId;
+  }
+
+  function handleDragStart(e, jobId) {
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", jobId);
+    setDraggedJobId(jobId);
+  }
+
   function addJob(defaults = {}) {
     setEditingJob(emptyJob(defaults));
   }
@@ -166,15 +174,19 @@ function App() {
       jobs: data.jobs.map((job) => {
         if (job.id !== jobId) return job;
 
-        const assignedTo = job.assignedTo.includes(workerId)
+        const currentAssigned = Array.isArray(job.assignedTo)
           ? job.assignedTo
-          : [...job.assignedTo, workerId];
+          : [];
+
+        const assignedTo = currentAssigned.includes(workerId)
+          ? currentAssigned
+          : [...currentAssigned, workerId];
 
         return {
           ...job,
           assignedTo,
           startDate,
-          endDate: job.endDate || startDate,
+          endDate: startDate,
           category: "Scheduled"
         };
       })
@@ -206,11 +218,16 @@ function App() {
       ...data,
       jobs: data.jobs.map((job) => {
         if (job.id !== jobId) return job;
-        if (job.assignedTo.includes(workerId)) return job;
+
+        const currentAssigned = Array.isArray(job.assignedTo)
+          ? job.assignedTo
+          : [];
+
+        if (currentAssigned.includes(workerId)) return job;
 
         return {
           ...job,
-          assignedTo: [...job.assignedTo, workerId],
+          assignedTo: [...currentAssigned, workerId],
           category: job.startDate ? "Scheduled" : job.category
         };
       })
@@ -257,7 +274,9 @@ function App() {
       teamMembers: data.teamMembers.filter((m) => m.id !== memberId),
       jobs: data.jobs.map((job) => ({
         ...job,
-        assignedTo: job.assignedTo.filter((id) => id !== memberId)
+        assignedTo: Array.isArray(job.assignedTo)
+          ? job.assignedTo.filter((id) => id !== memberId)
+          : []
       }))
     });
   }
@@ -355,9 +374,20 @@ function App() {
                   <section
                     key={category}
                     className="bucket-section"
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => {
-                      if (draggedJobId) moveToBucket(draggedJobId, category);
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+
+                      const jobId = getDraggedJobId(e);
+
+                      if (jobId) {
+                        moveToBucket(jobId, category);
+                      }
+
                       setDraggedJobId(null);
                     }}
                   >
@@ -376,7 +406,7 @@ function App() {
                             data.teamMembers,
                             job.assignedTo
                           )}
-                          onDragStart={() => setDraggedJobId(job.id)}
+                          onDragStart={(e) => handleDragStart(e, job.id)}
                           onEdit={() => setEditingJob(job)}
                           onDelete={() => deleteJob(job.id)}
                         />
@@ -426,9 +456,20 @@ function App() {
                 <React.Fragment key={member.id}>
                   <div
                     className="worker-cell"
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={() => {
-                      if (draggedJobId) addWorkerToJob(draggedJobId, member.id);
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.dataTransfer.dropEffect = "move";
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+
+                      const jobId = getDraggedJobId(e);
+
+                      if (jobId) {
+                        addWorkerToJob(jobId, member.id);
+                      }
+
                       setDraggedJobId(null);
                     }}
                   >
@@ -450,6 +491,7 @@ function App() {
 
                     const cellJobs = scheduledJobs.filter(
                       (job) =>
+                        Array.isArray(job.assignedTo) &&
                         job.assignedTo.includes(member.id) &&
                         isDateWithinRange(iso, job.startDate, job.endDate)
                     );
@@ -460,10 +502,20 @@ function App() {
                         className={`calendar-cell ${
                           isToday(day) ? "today-cell" : ""
                         }`}
-                        onDragOver={(e) => e.preventDefault()}
-                        onDrop={() => {
-                          if (draggedJobId)
-                            scheduleJob(draggedJobId, member.id, iso);
+                        onDragOver={(e) => {
+                          e.preventDefault();
+                          e.dataTransfer.dropEffect = "move";
+                        }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+
+                          const jobId = getDraggedJobId(e);
+
+                          if (jobId) {
+                            scheduleJob(jobId, member.id, iso);
+                          }
+
                           setDraggedJobId(null);
                         }}
                       >
@@ -496,7 +548,7 @@ function App() {
                                   data.teamMembers,
                                   job.assignedTo
                                 )}
-                                onDragStart={() => setDraggedJobId(job.id)}
+                                onDragStart={(e) => handleDragStart(e, job.id)}
                                 onEdit={() => setEditingJob(job)}
                                 onDelete={() => deleteJob(job.id)}
                                 onExtend={() => extendJob(job.id, iso)}
@@ -661,7 +713,7 @@ function JobModal({ job, teamMembers, onClose, onSave }) {
   }
 
   function toggleWorker(workerId) {
-    const assigned = form.assignedTo || [];
+    const assigned = Array.isArray(form.assignedTo) ? form.assignedTo : [];
 
     const next = assigned.includes(workerId)
       ? assigned.filter((id) => id !== workerId)
@@ -765,7 +817,10 @@ function JobModal({ job, teamMembers, onClose, onSave }) {
               <label key={member.id} className="check-option">
                 <input
                   type="checkbox"
-                  checked={(form.assignedTo || []).includes(member.id)}
+                  checked={
+                    Array.isArray(form.assignedTo) &&
+                    form.assignedTo.includes(member.id)
+                  }
                   onChange={() => toggleWorker(member.id)}
                 />
                 {member.name}
@@ -879,6 +934,8 @@ function compareIsoDates(a, b) {
 }
 
 function getAssignedWorkerNames(teamMembers, ids = []) {
+  if (!Array.isArray(ids)) return "";
+
   return ids
     .map((id) => teamMembers.find((member) => member.id === id)?.name)
     .filter(Boolean)
