@@ -669,4 +669,84 @@ textarea {
     grid-template-columns: 1fr;
     gap: 0;
   }
+}.worker-profile-button {
+  display: grid;
+  gap: 3px;
+  text-align: left;
+  background: transparent;
+  padding: 0;
+  color: #18202a;
+}
+
+.worker-profile-button:hover strong {
+  text-decoration: underline;
+}
+
+.worker-profile-button strong {
+  display: block;
+  font-size: 16px;
+}
+
+.worker-profile-button span {
+  display: block;
+  color: #687385;
+  font-size: 13px;
+}
+
+.worker-profile-button em {
+  display: block;
+  color: #8791a1;
+  font-size: 12px;
+  font-style: normal;
+  margin-top: 2px;
+}
+
+.roster-badge {
+  display: inline-flex;
+  width: fit-content;
+  border-radius: 999px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 900;
+  margin-bottom: 6px;
+}
+
+.roster-badge.onsite {
+  background: #e9f7ef;
+  color: #226b3a;
+}
+
+.roster-badge.rnr {
+  background: #f1f4f8;
+  color: #687385;
+}
+
+.calendar-cell.rnr-cell {
+  background: #f5f7fa;
+}
+
+.calendar-cell.onsite-cell {
+  background: #fbfcfe;
+}
+
+.calendar-cell.today-cell.rnr-cell {
+  background: #fff7e6;
+}
+
+.worker-summary {
+  display: grid;
+  gap: 8px;
+  background: #f8fafc;
+  border: 1px solid #e1e6ee;
+  border-radius: 14px;
+  padding: 12px;
+  margin-top: 4px;
+}
+
+.worker-summary div {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #495466;
+  font-size: 13px;
 }
