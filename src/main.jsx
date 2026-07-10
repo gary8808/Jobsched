@@ -7,7 +7,6 @@ import {
   Pencil,
   X,
   Users,
-  CalendarDays,
   ChevronLeft,
   ChevronRight,
   PanelLeft,
@@ -84,14 +83,13 @@ function App() {
     return Array.from({ length: 7 }, (_, index) => addDays(weekStart, index));
   }, [weekStart]);
 
-  const filteredJobs = useMemo(() => {
+  // Search applies to both the bucket list and calendar.
+  // Category filter only applies to the bucket list, so scheduled jobs do not disappear from the calendar.
+  const searchMatchedJobs = useMemo(() => {
     const q = query.trim().toLowerCase();
 
     return data.jobs.filter((job) => {
-      const matchesCategory =
-        activeCategory === "All" || job.category === activeCategory;
-
-      const matchesSearch =
+      return (
         !q ||
         [
           job.title,
@@ -104,17 +102,23 @@ function App() {
         ]
           .join(" ")
           .toLowerCase()
-          .includes(q);
-
-      return matchesCategory && matchesSearch;
+          .includes(q)
+      );
     });
-  }, [data.jobs, data.teamMembers, query, activeCategory]);
+  }, [data.jobs, data.teamMembers, query]);
 
-  const bucketJobs = filteredJobs.filter(
-    (job) => job.category !== "Scheduled" && job.category !== "Completed"
-  );
+  const bucketJobs = searchMatchedJobs.filter((job) => {
+    const matchesCategory =
+      activeCategory === "All" || job.category === activeCategory;
 
-  const scheduledJobs = filteredJobs.filter(
+    return (
+      matchesCategory &&
+      job.category !== "Scheduled" &&
+      job.category !== "Completed"
+    );
+  });
+
+  const scheduledJobs = searchMatchedJobs.filter(
     (job) => job.startDate && job.endDate && job.assignedTo?.length
   );
 
