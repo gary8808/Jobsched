@@ -756,7 +756,7 @@ function JobCard({
       <div className="details">
         {job.workOrderNumber && (
           <span>
-            <b>WO:</b> {job.workOrderNumber}
+            <b>Tradify Job Number:</b> {job.workOrderNumber}
           </span>
         )}
 
