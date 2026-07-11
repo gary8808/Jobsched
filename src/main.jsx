@@ -1049,7 +1049,7 @@ function emptyJob(defaults = {}) {
   return {
     id: crypto.randomUUID(),
     title: "",
-    workOrderNumber: "",
+    workOrderNumber: "JB",
     address: "",
     clientContact: "",
     category: start ? "Scheduled" : "To be scheduled",
