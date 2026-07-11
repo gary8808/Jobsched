@@ -822,13 +822,13 @@ function JobModal({ job, teamMembers, onClose, onSave }) {
           </button>
         </div>
 
-        <label>
-          Job title
-          <input
-            value={form.title}
-            onChange={(e) => update("title", e.target.value)}
-          />
-        </label>
+       <label>
+  Tradify Job Number
+  <input
+    value={form.workOrderNumber}
+    onChange={(e) => update("workOrderNumber", e.target.value)}
+  />
+</label>
 
         <div className="two-col">
           <label>
