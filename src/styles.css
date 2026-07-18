@@ -655,3 +655,119 @@ label textarea {
   .people-layout { grid-template-columns: 1fr; }
   .people-list { border-right: 0; border-bottom: 1px solid #e1e6ee; padding-right: 0; padding-bottom: 12px; }
 }
+
+/* v14 employee AIM colours + message tabs */
+.employee-app-header {
+  background: linear-gradient(135deg, var(--aim-red), var(--aim-dark-red)) !important;
+  box-shadow: 0 16px 35px rgba(228, 29, 45, 0.22) !important;
+}
+
+.employee-job-banner {
+  background: var(--aim-red) !important;
+}
+
+.employee-range-tabs.pill-tabs button.active {
+  background: var(--aim-red) !important;
+  color: #fff !important;
+}
+
+.employee-actions .secondary:first-child,
+.primary-actions-row .secondary:first-child {
+  background: #fff5f6 !important;
+  color: var(--aim-dark-red) !important;
+}
+
+.message-tabs {
+  display: flex;
+  gap: 8px;
+  background: #f7f7f8;
+  border: 1px solid #e2e4e7;
+  border-radius: 16px;
+  padding: 8px;
+  margin-bottom: 14px;
+  width: fit-content;
+}
+
+.message-tabs button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border-radius: 999px;
+  padding: 9px 14px;
+  background: transparent;
+  color: var(--aim-charcoal);
+  font-weight: 900;
+}
+
+.message-tabs button.active {
+  background: var(--aim-red);
+  color: #fff;
+}
+
+.message-tabs span {
+  display: inline-grid;
+  place-items: center;
+  min-width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.75);
+  color: var(--aim-charcoal);
+  font-size: 12px;
+}
+
+.message-tabs button.active span {
+  background: rgba(255,255,255,0.2);
+  color: #fff;
+}
+
+
+/* v15 flexible booking rows */
+.schedule-blocks-panel {
+  border: 1px solid #e1e6ee;
+  background: #f8fafc;
+  border-radius: 14px;
+  padding: 12px;
+  margin-top: 14px;
+}
+
+.schedule-blocks-panel .card-top {
+  margin-bottom: 10px;
+}
+
+.schedule-block-row {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr 1fr 38px;
+  gap: 10px;
+  align-items: end;
+  background: #fff;
+  border: 1px solid #e1e6ee;
+  border-radius: 12px;
+  padding: 10px;
+  margin-top: 8px;
+}
+
+.schedule-block-row label {
+  margin-bottom: 0;
+}
+
+.continuation {
+  display: grid;
+  gap: 4px;
+  color: #18202a;
+  font-size: 13px;
+  line-height: 1.25;
+}
+
+.continuation strong {
+  display: block;
+  font-size: 14px;
+}
+
+.continuation span {
+  color: #687385;
+  font-size: 12px;
+}
+
+@media(max-width:760px){
+  .schedule-block-row { grid-template-columns: 1fr; }
+}
