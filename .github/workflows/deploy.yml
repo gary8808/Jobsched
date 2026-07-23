@@ -31,11 +31,11 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
-          
-- name: Create environment file
-  run: |
-    echo "VITE_SUPABASE_URL=${{ vars.VITE_SUPABASE_URL }}" >> .env.production
-    echo "VITE_SUPABASE_ANON_KEY=${{ vars.VITE_SUPABASE_ANON_KEY }}" >> .env.production
+
+      - name: Create environment file
+        run: |
+          echo "VITE_SUPABASE_URL=${{ vars.VITE_SUPABASE_URL }}" >> .env.production
+          echo "VITE_SUPABASE_ANON_KEY=${{ vars.VITE_SUPABASE_ANON_KEY }}" >> .env.production
 
       - name: Install dependencies
         run: npm install
@@ -53,4 +53,4 @@ jobs:
 
       - name: Deploy to GitHub Pages
         id: deployment
-        uses: actions/deploy-pages@v4
+        uses: actions/deploy-pages@v4    
