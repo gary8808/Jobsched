@@ -15,7 +15,7 @@ import { supabase, supabaseConfig } from "./supabaseClient";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-const STORAGE_KEY = "jobsched-v36-inbound-sms-webhook";
+const STORAGE_KEY = "jobsched-v37-message-display-fixes";
 const CURRENT_USER = "Demo User";
 
 const CATEGORIES = [
@@ -262,6 +262,39 @@ function App() {
     checkSupabase();
     return () => { alive = false; };
   }, [session, authLoading]);
+
+  useEffect(() => {
+    if (!supabase || !session) return;
+
+    let alive = true;
+
+    async function refreshMessages() {
+      try {
+        const freshMessages = await fetchMessagesFromSupabase();
+        if (!alive) return;
+        setData(current => ({
+          ...current,
+          messages: freshMessages
+        }));
+      } catch (err) {
+        console.error("Could not refresh messages", err);
+      }
+    }
+
+    refreshMessages();
+
+    const channel = supabase
+      .channel("jobsched-messages")
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
+        refreshMessages();
+      })
+      .subscribe();
+
+    return () => {
+      alive = false;
+      supabase.removeChannel(channel);
+    };
+  }, [session?.user?.id]);
 
 
   useEffect(() => {
@@ -1059,7 +1092,7 @@ function App() {
 
       <footer className="footer-actions"><button className="ghost" onClick={()=>{if(confirm("Reset demo data?")){updateData(initialData)}}}><RotateCcw size={15}/> Reset demo data</button></footer>
 
-      {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} currentUser={currentUser} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} />}
+      {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} currentUser={currentUser} messages={data.messages} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} />}
       {calendarPopup && <CalendarItemModal context={calendarPopup} onClose={()=>setCalendarPopup(null)} onSave={saveCalendarItem}/>} 
       {peopleOpen && isAdminUser && <PeopleModal workers={data.teamMembers} usingSupabase={Boolean(session && supabase)} saving={workersLoading} onClose={()=>setPeopleOpen(false)} onSave={async (workers)=>{
         try {
@@ -1334,7 +1367,7 @@ function QuickActionsBar({ selectedJob, selectedBooking, copiedJob, bucketJob, o
 }
 
 function JobMessagesModal({ job, messages, onClose, onAction }) {
-  const sorted = [...messages].sort((a,b)=>new Date(b.date||0)-new Date(a.date||0));
+  const sorted = [...(messages || [])].sort((a,b)=>new Date(b.date||0)-new Date(a.date||0));
   return (
     <div className="modal-backdrop">
       <div className="modal mini-modal">
@@ -1342,10 +1375,10 @@ function JobMessagesModal({ job, messages, onClose, onAction }) {
         <div className="message-list compact">
           {sorted.map(m => (
             <article key={m.id} className={m.unread && !m.actioned ? "message-card unread" : "message-card"}>
-              <div><strong>{m.direction === "in" ? "Received" : "Sent"}: {m.from}</strong><span>{formatDateTime(m.date)}</span></div>
-              <p>{m.text}</p>
-              {m.actioned && <em>Actioned by {m.actionedBy} on {formatDateTime(m.actionedAt)}</em>}
-              {!m.actioned && <button className="secondary" onClick={()=>onAction(m)}>Mark as actioned</button>}
+              <div><strong>{m.direction === "in" ? "Received" : "Sent"}: {m.direction === "in" ? (m.from || m.phoneNumber || "Client") : (m.to || m.phoneNumber || "Client")}</strong><span>{formatDateTime(m.date)}</span></div>
+              <p>{m.text || "(No message text)"}</p>
+              {m.actioned && m.actionedAt && <em>Actioned {m.actionedBy ? `by ${m.actionedBy} ` : ""}on {formatDateTime(m.actionedAt)}</em>}
+              {!m.actioned && m.direction === "in" && <button className="secondary" onClick={()=>onAction(m)}>Mark as actioned</button>}
             </article>
           ))}
           {!sorted.length && <div className="empty small">No SMS/email messages linked to this job yet.</div>}
@@ -1415,7 +1448,7 @@ function JobCard({ job, workerNames, selected, onSelect, onDragStart, onEdit, on
   );
 }
 
-function JobModal({ job, teamMembers, currentUser, onClose, onSave, onSendMessage }) {
+function JobModal({ job, teamMembers, currentUser, messages = [], onClose, onSave, onSendMessage, onActionMessage }) {
   const [form, setForm] = useState(normaliseJob(job));
   const [activeTab, setActiveTab] = useState(job._openClientTab ? "client" : "details");
   const [noteInput, setNoteInput] = useState("");
@@ -1424,6 +1457,12 @@ function JobModal({ job, teamMembers, currentUser, onClose, onSave, onSendMessag
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [smsSending, setSmsSending] = useState(false);
   const [smsStatus, setSmsStatus] = useState("");
+  const jobMessages = useMemo(
+    () => [...(messages || [])]
+      .filter((m) => m.jobId === form.id)
+      .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)),
+    [messages, form.id]
+  );
   const tabs = ["details","scheduling","client","notes","materials","attachments","history"];
   function update(field, value){ setForm({...form,[field]:value}); }
   function updateStartDate(value){
@@ -1518,7 +1557,7 @@ function JobModal({ job, teamMembers, currentUser, onClose, onSave, onSendMessag
     <div className="worker-picker"><strong>Assigned workers for the main booking dates</strong><p className="muted">The main booking uses the start and end dates on the Details tab.</p><div className="worker-options">{teamMembers.map(m=><label key={m.id} className="check-option"><input type="checkbox" checked={form.assignedTo.includes(m.id)} onChange={()=>toggleWorker(m.id)}/>{m.name}</label>)}</div></div>
     <section className="schedule-blocks-panel"><div className="card-top"><div><strong>Additional booking days / employees</strong><p className="muted">Use this for non-consecutive days, return visits, or different employees on different dates.</p></div><button type="button" className="secondary" onClick={addScheduleBlock}><Plus size={15}/> Add booking</button></div>{(form.scheduleBlocks||[]).map(block=><div className="schedule-block-row" key={block.id}><label>Employee<select value={block.workerId||""} onChange={e=>updateScheduleBlock(block.id,"workerId",e.target.value)}><option value="">Select employee</option>{teamMembers.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label><label>Start<input type="date" value={block.startDate||""} onChange={e=>updateScheduleBlock(block.id,"startDate",e.target.value)}/></label><label>End<input type="date" value={block.endDate||""} onChange={e=>updateScheduleBlock(block.id,"endDate",e.target.value)}/></label><button type="button" className="icon" onClick={()=>removeScheduleBlock(block.id)}><X size={15}/></button></div>)}{!(form.scheduleBlocks||[]).length&&<p className="muted">No additional booking rows added.</p>}</section>
   </section>}
-  {activeTab==="client"&&<section className="job-tab-panel"><div className="two-col"><label>Client contact<input value={form.clientContact||""} onChange={e=>update("clientContact",e.target.value)}/></label><label>Client phone<input value={form.clientPhone||""} onChange={e=>update("clientPhone",e.target.value)} placeholder="e.g. 04xx xxx xxx or +61..."/></label></div><div className="appointment-panel stacked"><label className="check-option plain"><input type="checkbox" checked={!!form.appointmentSent} onChange={e=>update("appointmentSent",e.target.checked)}/>Appointment SMS sent</label><label className="check-option plain"><input type="checkbox" checked={!!form.clientAccepted} onChange={e=>update("clientAccepted",e.target.checked)}/>Client accepted appointment</label><div className="message-template-actions"><button type="button" className="secondary" onClick={()=>setMessageText(buildScheduleMessage(form))}>Scheduling message</button><button type="button" className="secondary" onClick={()=>setMessageText(buildRescheduleMessage(form))}>Reschedule message</button></div><label className="full-width-label">SMS message text<textarea rows="5" value={messageText} onChange={e=>setMessageText(e.target.value)}/></label><button type="button" className={smsStatus === "SMS sent and saved" ? "secondary success-button" : "secondary"} disabled={smsSending} onClick={handleSendClientMessage}><MessageSquare size={16}/> {smsSending ? "Sending..." : smsStatus === "SMS sent and saved" ? "SMS sent" : "Send SMS"}</button>{smsStatus && <span className={smsStatus === "SMS sent and saved" ? "success-text" : "error-text"}>{smsStatus}</span>}<a className="secondary" href={form.clientPhone?`tel:${form.clientPhone}`:undefined} onClick={(e)=>{if(!form.clientPhone){e.preventDefault(); alert("Enter a client phone number first.")}}}><Phone size={16}/> Call client</a></div></section>}
+  {activeTab==="client"&&<section className="job-tab-panel"><div className="two-col"><label>Client contact<input value={form.clientContact||""} onChange={e=>update("clientContact",e.target.value)}/></label><label>Client phone<input value={form.clientPhone||""} onChange={e=>update("clientPhone",e.target.value)} placeholder="e.g. 04xx xxx xxx or +61..."/></label></div><div className="appointment-panel stacked"><label className="check-option plain"><input type="checkbox" checked={!!form.appointmentSent} onChange={e=>update("appointmentSent",e.target.checked)}/>Appointment SMS sent</label><label className="check-option plain"><input type="checkbox" checked={!!form.clientAccepted} onChange={e=>update("clientAccepted",e.target.checked)}/>Client accepted appointment</label><div className="message-template-actions"><button type="button" className="secondary" onClick={()=>setMessageText(buildScheduleMessage(form))}>Scheduling message</button><button type="button" className="secondary" onClick={()=>setMessageText(buildRescheduleMessage(form))}>Reschedule message</button></div><label className="full-width-label">SMS message text<textarea rows="5" value={messageText} onChange={e=>setMessageText(e.target.value)}/></label><button type="button" className={smsStatus === "SMS sent and saved" ? "secondary success-button" : "secondary"} disabled={smsSending} onClick={handleSendClientMessage}><MessageSquare size={16}/> {smsSending ? "Sending..." : smsStatus === "SMS sent and saved" ? "SMS sent" : "Send SMS"}</button>{smsStatus && <span className={smsStatus === "SMS sent and saved" ? "success-text" : "error-text"}>{smsStatus}</span>}<a className="secondary" href={form.clientPhone?`tel:${form.clientPhone}`:undefined} onClick={(e)=>{if(!form.clientPhone){e.preventDefault(); alert("Enter a client phone number first.")}}}><Phone size={16}/> Call client</a></div><section className="message-history-panel"><div className="card-top"><div><strong>SMS history</strong><p className="muted">Sent and received messages linked to this job.</p></div></div><div className="message-list compact">{jobMessages.map(m=><article key={m.id} className={m.unread&&!m.actioned?"message-card unread":"message-card"}><div><strong>{m.direction==="in"?"Received":"Sent"}: {m.direction==="in"?(m.from||m.phoneNumber||"Client"):(m.to||m.phoneNumber||"Client")}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text||"(No message text)"}</p>{m.actioned&&m.actionedAt&&<em>Actioned {m.actionedBy?`by ${m.actionedBy} `:""}on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&m.direction==="in"&&<button type="button" className="secondary" onClick={()=>onActionMessage?.(m)}>Mark as actioned</button>}</article>)}{!jobMessages.length&&<div className="empty small">No SMS messages linked to this job yet.</div>}</div></section></section>}
   {activeTab==="notes"&&<section className="job-tab-panel"><label>Job description / scope<textarea rows="6" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><div className="note-entry"><textarea rows="3" value={noteInput} onChange={e=>setNoteInput(e.target.value)} placeholder="Add note history entry..."/><button type="button" className="secondary" onClick={addNote}>Add note</button></div><HistoryList items={form.noteHistory||[]} type="notes"/></section>}
   {activeTab==="materials"&&<section className="job-tab-panel"><label>Materials status<select value={form.materialsStatus||"Not checked"} onChange={e=>update("materialsStatus",e.target.value)}>{MATERIAL_STATUSES.map(m=><option key={m}>{m}</option>)}</select></label><div className="note-entry"><input value={materialInput} onChange={e=>setMaterialInput(e.target.value)} placeholder="Add material item..."/><button type="button" className="secondary" onClick={addMaterial}><Package size={16}/> Add material</button></div><div className="simple-list">{(form.materials||[]).map(item=><div key={item.id}><span>{item.text}</span><button type="button" onClick={()=>setForm(cur=>({...cur,materials:cur.materials.filter(x=>x.id!==item.id)}))}><X size={14}/></button></div>)}{!(form.materials||[]).length&&<p>No materials added.</p>}</div></section>}
   {activeTab==="attachments"&&<section className="job-tab-panel"><div className="attachment-drop" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault(); addAttachments(e.dataTransfer.files||[]);}}><Paperclip size={24}/><strong>Drag files or photos here</strong><span>Files are uploaded to Supabase Storage and linked to this job.</span><label className="secondary file-pick">Choose files<input type="file" multiple disabled={attachmentUploading} onChange={e=>addAttachments(e.target.files||[])}/></label>{attachmentUploading && <span className="muted">Uploading...</span>}</div><div className="simple-list">{(form.attachments||[]).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button><button type="button" onClick={()=>setForm(cur=>({...cur,attachments:cur.attachments.filter(x=>x.id!==a.id)}))}><X size={14}/></button></div>)}</div></section>}
@@ -1835,12 +1874,14 @@ function ShareScheduleModal({ data, workers, onClose }) { const [startDate,setSt
 
 function MessagesModal({ messages, jobs, onClose, onAction }) {
   const [tab, setTab] = useState("new");
-  const visibleMessages = messages.filter(m => m.direction === "in" || m.direction === "out" || m.channel === "email" || m.channel === "sms");
-  const newMessages = visibleMessages.filter(m => !m.actioned);
-  const actionedMessages = visibleMessages.filter(m => m.actioned);
+  const visibleMessages = [...(messages || [])]
+    .filter(m => m.channel === "email" || m.channel === "sms" || m.direction === "in" || m.direction === "out")
+    .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
+  const newMessages = visibleMessages.filter(m => m.direction === "in" && !m.actioned);
+  const actionedMessages = visibleMessages.filter(m => m.actioned || m.direction === "out");
   const selectedMessages = tab === "actioned" ? actionedMessages : newMessages;
 
-  return <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Messages</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="message-tabs"><button className={tab === "new" ? "active" : ""} onClick={() => setTab("new")}>New <span>{newMessages.length}</span></button><button className={tab === "actioned" ? "active" : ""} onClick={() => setTab("actioned")}>Actioned <span>{actionedMessages.length}</span></button></div><div className="message-list">{selectedMessages.map(m=>{const job=jobs.find(j=>j.id===m.jobId);return <article key={m.id} className={m.unread?"message-card unread":"message-card"}><div><strong>{m.direction==="in"?"Received":"Sent"}: {m.from}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text}</p>{job&&<em>Linked job: {job.title}</em>}{m.actioned&&<em>Actioned by {m.actionedBy} on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&<button className="secondary" onClick={()=>onAction(m)}>Mark as actioned</button>}</article>})}{!selectedMessages.length&&<div className="empty">{tab === "actioned" ? "No actioned messages yet." : "No new demo SMS/email messages."}</div>}</div></div></div>
+  return <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Messages</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="message-tabs"><button className={tab === "new" ? "active" : ""} onClick={() => setTab("new")}>New <span>{newMessages.length}</span></button><button className={tab === "actioned" ? "active" : ""} onClick={() => setTab("actioned")}>Actioned / Sent <span>{actionedMessages.length}</span></button></div><div className="message-list">{selectedMessages.map(m=>{const job=jobs.find(j=>j.id===m.jobId); const label=m.direction==="in"?"Received":"Sent"; const party=m.direction==="in"?(m.from||m.phoneNumber||"Client"):(m.to||m.phoneNumber||"Client"); return <article key={m.id} className={m.unread&&!m.actioned?"message-card unread":"message-card"}><div><strong>{label}: {party}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text||"(No message text)"}</p>{job&&<em>Linked job: {job.title}</em>}{m.actioned&&m.actionedAt&&<em>Actioned {m.actionedBy?`by ${m.actionedBy} `:""}on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&m.direction==="in"&&<button className="secondary" onClick={()=>onAction(m)}>Mark as actioned</button>}</article>})}{!selectedMessages.length&&<div className="empty">{tab === "actioned" ? "No actioned or sent messages yet." : "No new SMS/email messages."}</div>}</div></div></div>
 }
 
 function HistoryModal({ job, onClose }) { return <div className="modal-backdrop"><div className="modal mini-modal"><div className="modal-header"><h2>Job history</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><HistoryList items={job.jobHistory||[]} type="history"/></div></div> }
@@ -2380,20 +2421,25 @@ async function markMessageActionedInSupabase({ messageId, actionedBy = null }) {
 }
 
 function mapMessageFromSupabase(row = {}) {
+  const rawDirection = row.direction || row.message_direction || "outbound";
+  const direction = rawDirection === "inbound" || rawDirection === "in" ? "in" : "out";
+
   return {
     id: row.id || createId(),
     jobId: row.job_id || row.jobId || "",
-    direction: row.direction || "out",
+    direction,
+    rawDirection,
     channel: row.channel || "sms",
-    from: row.from_number || row.from || (row.direction === "in" ? "Client" : "Jobsched"),
+    from: row.from_number || row.from || (direction === "in" ? "Client" : "Jobsched"),
     to: row.to_number || row.to || "",
-    text: row.message_text || row.text || "",
-    date: row.created_at || row.date || new Date().toISOString(),
+    phoneNumber: row.phone_number || row.phoneNumber || "",
+    text: row.message_body || row.message_text || row.text || row.body || "",
+    date: row.received_at || row.created_at || row.date || new Date().toISOString(),
     unread: Boolean(row.unread),
     actioned: Boolean(row.actioned),
     actionedBy: row.actioned_by || row.actionedBy || "",
     actionedAt: row.actioned_at || row.actionedAt || "",
-    status: row.status || "sent",
+    status: row.status || (direction === "in" ? "received" : "sent"),
     provider: row.provider || "",
     providerMessageId: row.provider_message_id || ""
   };
@@ -2721,7 +2767,12 @@ function isToday(date){ return getIsoDate(date)===getIsoDate(new Date()); }
 function formatDayName(date){ return new Intl.DateTimeFormat("en-AU",{weekday:"short"}).format(date); }
 function formatDateHeader(date){ return new Intl.DateTimeFormat("en-AU",{day:"2-digit",month:"short"}).format(date); }
 function formatIsoForDisplay(iso){ return new Intl.DateTimeFormat("en-AU",{weekday:"short",day:"2-digit",month:"short",year:"numeric"}).format(new Date(iso+"T00:00:00")); }
-function formatDateTime(iso){ return new Intl.DateTimeFormat("en-AU",{dateStyle:"short",timeStyle:"short"}).format(new Date(iso)); }
+function formatDateTime(iso){
+  if (!iso) return "";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "";
+  return new Intl.DateTimeFormat("en-AU",{dateStyle:"short",timeStyle:"short"}).format(date);
+}
 function labelTab(t){ return ({details:"Details",scheduling:"Scheduling",client:"Client / SMS",notes:"Notes",materials:"Materials",attachments:"Attachments",history:"History"})[t]||t; }
 
 

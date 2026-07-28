@@ -1435,3 +1435,6 @@ label textarea {
   font-weight: 700;
   font-size: 0.85rem;
 }
+
+/* v37 message display fixes */
+.message-history-panel{background:#fff;border:1px solid #e1e6ee;border-radius:14px;padding:12px;margin-top:14px}.message-history-panel .card-top{margin-bottom:10px}.message-history-panel .muted{margin:4px 0 0;color:#687385;font-size:13px}.message-list.compact .message-card{padding:10px}.message-card p{white-space:pre-wrap;line-height:1.4}.success-text{color:#067647;font-weight:800}.error-text{color:#b42318;font-weight:800}.success-button{background:#dcfae6!important;color:#067647!important}
