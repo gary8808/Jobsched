@@ -15,7 +15,7 @@ import { supabase, supabaseConfig } from "./supabaseClient";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-const STORAGE_KEY = "jobsched-v38-reply-action-messages";
+const STORAGE_KEY = "jobsched-v40-pwa";
 const CURRENT_USER = "Demo User";
 
 const CATEGORIES = [
@@ -145,6 +145,36 @@ function App() {
   const [jobsLoading, setJobsLoading] = useState(false);
   const [jobsSyncMessage, setJobsSyncMessage] = useState("Local demo jobs active until Supabase jobs are loaded.");
   const [passwordSetupMode, setPasswordSetupMode] = useState(() => getAuthReturnType());
+  const [installPrompt, setInstallPrompt] = useState(null);
+  const [isInstalledPwa, setIsInstalledPwa] = useState(() => window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true);
+
+  useEffect(() => {
+    function handleBeforeInstallPrompt(event) {
+      event.preventDefault();
+      setInstallPrompt(event);
+    }
+    function handleInstalled() {
+      setIsInstalledPwa(true);
+      setInstallPrompt(null);
+    }
+    window.addEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+    window.addEventListener("appinstalled", handleInstalled);
+    return () => {
+      window.removeEventListener("beforeinstallprompt", handleBeforeInstallPrompt);
+      window.removeEventListener("appinstalled", handleInstalled);
+    };
+  }, []);
+
+  async function installJobsched() {
+    if (installPrompt) {
+      await installPrompt.prompt();
+      const choice = await installPrompt.userChoice;
+      if (choice?.outcome === "accepted") setIsInstalledPwa(true);
+      setInstallPrompt(null);
+      return;
+    }
+    alert("On iPhone/iPad, tap Share then Add to Home Screen. On Android/desktop, open the browser menu and choose Install app or Add to Home screen.");
+  }
 
   useEffect(() => {
     let alive = true;
@@ -375,8 +405,13 @@ function App() {
   const activeView = isAdminUser ? view : "employee";
 
   useEffect(() => {
-    if (currentUser && !isAdminUser && view !== "employee") setView("employee");
-  }, [currentUser, isAdminUser, view]);
+    if (!currentUser || profileLoading) return;
+    if (isAdminUser) {
+      setView("admin");
+    } else if (view !== "employee") {
+      setView("employee");
+    }
+  }, [currentUser?.id, profileLoading, isAdminUser]);
 
   useEffect(() => {
     if (!currentUser || isAdminUser || !data.teamMembers.length) return;
@@ -1246,7 +1281,7 @@ Reply: ${messageText}` };
           alert(err?.message || "Could not save employees or send invite.");
         }
       }} />}
-      {settingsOpen && currentUser && <SettingsModal currentUser={currentUser} currentRole={currentRole} isAdminUser={isAdminUser} activeView={activeView} onClose={()=>setSettingsOpen(false)} onSetView={(nextView)=>{setView(nextView); setSettingsOpen(false);}} onChangePassword={()=>{setPasswordSetupMode("manual"); setSettingsOpen(false);}} onSignOut={async()=>{setSettingsOpen(false); await signOut();}} />}
+      {settingsOpen && currentUser && <SettingsModal currentUser={currentUser} currentRole={currentRole} isAdminUser={isAdminUser} activeView={activeView} isInstalledPwa={isInstalledPwa} canPromptInstall={Boolean(installPrompt)} onInstall={installJobsched} onClose={()=>setSettingsOpen(false)} onSetView={(nextView)=>{setView(nextView); setSettingsOpen(false);}} onChangePassword={()=>{setPasswordSetupMode("manual"); setSettingsOpen(false);}} onSignOut={async()=>{setSettingsOpen(false); await signOut();}} />}
       {shareHubOpen && <ShareHubModal onClose={()=>setShareHubOpen(false)} onShare={()=>{setShareHubOpen(false); setShareOpen(true)}} onRunSheet={()=>{setShareHubOpen(false); setRunSheetOpen(true)}} />}
       {shareOpen && <ShareScheduleModal data={data} workers={data.teamMembers} onClose={()=>setShareOpen(false)} />}
       {runSheetOpen && <DailyRunSheetModal data={data} workers={data.teamMembers} onClose={()=>setRunSheetOpen(false)} />}
@@ -1405,7 +1440,7 @@ function NeedsAttentionDashboard({ jobs, workers, days, leaveRecords, messages, 
   const activeJobs = jobs.filter(j => j.category !== "Cancelled" && j.category !== "Completed" && !j.isAdHoc && !j.isTravelComment);
   const notReady = activeJobs.filter(j => !getReadiness(j).ready);
   const unread = messages.filter(m => m.unread).length;
-  const missingMaterials = activeJobs.filter(j => !["Ready", "Not required"].includes(j.materialsStatus || "Not checked"));
+  const missingMaterials = activeJobs.filter(isAwaitingMaterials);
   const unconfirmedScheduled = activeJobs.filter(j => j.category === "Scheduled" && !j.clientAccepted);
   const conflictJobs = activeJobs.filter(job => (job.assignedTo || []).some(workerId => {
     const worker = workers.find(w => w.id === workerId);
@@ -1426,7 +1461,7 @@ function NeedsAttentionDashboard({ jobs, workers, days, leaveRecords, messages, 
 function NeedsAttentionView({ jobs, workers, days, leaveRecords, messages, activeTab, setActiveTab, onOpenJob }) {
   const activeJobs = jobs.filter(j => j.category !== "Cancelled" && j.category !== "Completed" && !j.isAdHoc && !j.isTravelComment);
   const actionNeeded = activeJobs.filter(job => isActionNeeded(job, messages));
-  const awaitingMaterials = activeJobs.filter(job => !["Ready", "Not required"].includes(job.materialsStatus || "Not checked"));
+  const awaitingMaterials = activeJobs.filter(isAwaitingMaterials);
   const unconfirmed = activeJobs.filter(job => job.category === "Scheduled" && !job.clientAccepted && !job.isAdHoc && !job.isTravelComment);
   const unread = messages.filter(m => m.unread);
   const unreadJobIds = new Set(unread.map(m => m.jobId));
@@ -1805,7 +1840,7 @@ function SideNav({ unreadMessages, isAdmin, onShare, onMessages, onPeople, onSet
   );
 }
 
-function SettingsModal({ currentUser, currentRole, isAdminUser, activeView, onClose, onSetView, onChangePassword, onSignOut }) {
+function SettingsModal({ currentUser, currentRole, isAdminUser, activeView, isInstalledPwa, canPromptInstall, onInstall, onClose, onSetView, onChangePassword, onSignOut }) {
   return (
     <div className="modal-backdrop">
       <div className="modal mini-modal settings-menu-modal">
@@ -1813,6 +1848,7 @@ function SettingsModal({ currentUser, currentRole, isAdminUser, activeView, onCl
         <div className="settings-action-list">
           {isAdminUser && <button type="button" className={activeView === "admin" ? "choice-card active" : "choice-card"} onClick={() => onSetView("admin")}><UserCog/><strong>Admin view</strong><span>Calendar, job dashboard, people and settings.</span></button>}
           <button type="button" className={activeView === "employee" ? "choice-card active" : "choice-card"} onClick={() => onSetView("employee")}><Users/><strong>Employee view</strong><span>Employee schedule, notes and job operation controls.</span></button>
+          <button type="button" className="choice-card" onClick={onInstall} disabled={isInstalledPwa}><Download/><strong>{isInstalledPwa ? "App installed" : "Install AIM Jobsched"}</strong><span>{isInstalledPwa ? "Jobsched is running as an installed app on this device." : canPromptInstall ? "Add an AIM Jobsched icon to this device." : "Show instructions to add Jobsched to the home screen."}</span></button>
           <button type="button" className="choice-card" onClick={onChangePassword}><Settings/><strong>Change password</strong><span>Set or update the password for this account.</span></button>
           <button type="button" className="choice-card" onClick={onSignOut}><X/><strong>Sign out</strong><span>Log out of Jobsched on this device.</span></button>
         </div>
@@ -2800,7 +2836,7 @@ function findSchedulingConflicts(job, worker, date, jobs, leaveRecords) {
   if (availability.status !== "Onsite") conflicts.push(`${worker.name} is ${availability.label} on ${date}`);
   if (jobTradeText(job) && worker.trade && !getJobTrades(job).includes(worker.trade)) conflicts.push(`Job requires ${jobTradeText(job)}, but ${worker.name} is ${worker.trade}`);
   if (!job.clientAccepted && !job.isAdHoc && !job.isTravelComment) conflicts.push("Client appointment has not been accepted");
-  if (!["Ready", "Not required"].includes(job.materialsStatus || "Not checked") && !job.isAdHoc && !job.isTravelComment) conflicts.push(`Materials status is ${job.materialsStatus || "Not checked"}`);
+  if (isAwaitingMaterials(job) && !job.isAdHoc && !job.isTravelComment) conflicts.push(`Materials status is ${job.materialsStatus}`);
   const clash = jobs.find(other => other.id !== job.id && other.category !== "Cancelled" && other.assignedTo?.includes(worker.id) && isDateWithinRange(date, other.startDate, other.endDate));
   if (clash) conflicts.push(`${worker.name} already has another job scheduled that day: ${clash.title}`);
   return conflicts;
@@ -3031,6 +3067,15 @@ function getWorkerAvailability(worker, iso, leaveRecords = []) {
   };
 }
 
+function effectiveMaterialsStatus(job) {
+  const status = String(job?.materialsStatus || "").trim();
+  return !status || status === "Not checked" ? "Not required" : status;
+}
+
+function isAwaitingMaterials(job) {
+  return ["Required", "Ordered", "Partially arrived"].includes(effectiveMaterialsStatus(job));
+}
+
 function getReadiness(job) {
   if (job?.isAdHoc || job?.isTravelComment) return { ready: true, missing: [] };
   const missing = [];
@@ -3038,7 +3083,7 @@ function getReadiness(job) {
   if (!job.title) missing.push("job title");
   if (!job.client) missing.push("client");
   if (!job.address && !job.site) missing.push("address/site");
-  if (!job.materialsStatus || job.materialsStatus === "Not checked") missing.push("materials status");
+  // Blank or Not checked materials status is treated as materials N/A.
   if (hasOutstandingSafetyPermits(job)) missing.push("safety/permits organised");
 
   return {
@@ -3048,3 +3093,10 @@ function getReadiness(job) {
 }
 
 createRoot(document.getElementById("root")).render(<App />);
+
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
+      .catch(error => console.error("Jobsched service worker registration failed", error));
+  });
+}
