@@ -1,3 +1,7 @@
+AIM CG v42 – Machinery Scheduling
+
+See BUILD_NOTES_v42_MACHINERY.md for deployment instructions.
+
 # Job Scheduler - Calendar with Buckets
 
 This is a GitHub Pages-ready prototype for a web-based job scheduler.
