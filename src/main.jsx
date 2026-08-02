@@ -770,9 +770,12 @@ function App() {
         getAllAssignedWorkerIds(updated).forEach(id => {
           resetWorkerStatus[id] = { status: "notStarted", totalMs: 0, runningSince: null, updatedAt: resetAt };
         });
+        const currentVisitId = createId();
+        Object.values(resetWorkerStatus).forEach(state => { state.visitId = currentVisitId; });
         updated = {
           ...updated,
           priorVisits,
+          currentVisitId,
           currentVisitStartedAt: resetAt,
           workerStatus: resetWorkerStatus,
           workerCompletions: {},
@@ -1093,7 +1096,10 @@ Reply: ${messageText}` };
     updateJobs(job => {
       if (job.id !== jobId) return job;
       const now = Date.now();
-      const current = job.workerStatus?.[workerId] || { status: "notStarted", totalMs: 0, runningSince: null };
+      const rawCurrent = job.workerStatus?.[workerId] || { status: "notStarted", totalMs: 0, runningSince: null };
+      const currentVisitId = getCurrentVisitId(job);
+      const belongsToCurrentVisit = !isDefectJob(job) || !currentVisitId || rawCurrent.visitId === currentVisitId;
+      const current = belongsToCurrentVisit ? rawCurrent : { status: "notStarted", totalMs: 0, runningSince: null, visitId: currentVisitId };
       let totalMs = current.totalMs || 0;
       if (current.status === "running" && current.runningSince) totalMs += now - current.runningSince;
       const runningSince = nextStatus === "running" ? now : null;
@@ -1103,7 +1109,8 @@ Reply: ${messageText}` };
           status: nextStatus,
           totalMs,
           runningSince,
-          updatedAt: new Date().toISOString()
+          updatedAt: new Date().toISOString(),
+          visitId: currentVisitId || null
         }
       };
       return logJob({ ...job, workerStatus: updatedStatus }, "Employee status", `${workerName} changed status to ${statusLabel}.`);
@@ -1112,7 +1119,11 @@ Reply: ${messageText}` };
     if (session && supabase && isUuid(jobId) && isUuid(workerId)) {
       try {
         const currentJob = data.jobs.find(item => item.id === jobId);
-        const priorStatus = currentJob?.workerStatus?.[workerId] || { status: "notStarted", totalMs: 0, runningSince: null };
+        const rawPriorStatus = currentJob?.workerStatus?.[workerId] || { status: "notStarted", totalMs: 0, runningSince: null };
+        const currentVisitId = getCurrentVisitId(currentJob);
+        const priorStatus = (!isDefectJob(currentJob) || !currentVisitId || rawPriorStatus.visitId === currentVisitId)
+          ? rawPriorStatus
+          : { status: "notStarted", totalMs: 0, runningSince: null, visitId: currentVisitId };
         const now = Date.now();
         let totalMs = Number(priorStatus.totalMs) || 0;
         if (priorStatus.status === "running" && priorStatus.runningSince) totalMs += now - Number(priorStatus.runningSince);
@@ -1122,7 +1133,8 @@ Reply: ${messageText}` };
           status: nextStatus,
           totalMs,
           runningSince: nextStatus === "running" ? now : null,
-          updatedAt: new Date(now).toISOString()
+          updatedAt: new Date(now).toISOString(),
+          visitId: currentVisitId || null
         });
         await insertJobHistoryToSupabase({
           jobId,
@@ -1224,6 +1236,8 @@ Reply: ${messageText}` };
         [workerId]: {
           ...(job.workerCompletions?.[workerId] || {}),
           ...completion,
+          visitId: getCurrentVisitId(job) || null,
+          submittedComplete: getCurrentWorkerStatus(job, workerId) === "completed",
           updatedAt: new Date().toISOString(),
           updatedBy: workerName
         }
@@ -1763,9 +1777,12 @@ function CalendarGrid({ days, dayMin = "230px", workers, jobs, leaveRecords, mes
 }
 
 function CalendarJob({ job, workerId, date, isStart, selected, hasAnyMessage, hasUnreadMessage, onSelect, onOpenMessages, onDragStart, onEdit, onDelete, onToggleAppointmentSent, onToggleClientAccepted, onConfirmComplete }) {
-  const status = job.workerStatus?.[workerId]?.status || "notStarted";
+  const status = getCurrentWorkerStatus(job, workerId);
   const meta = STATUS_META[status] || STATUS_META.notStarted;
-  const completedByTrade = job.workerStatus?.[workerId]?.status === "completed";
+  const currentVisitId = getCurrentVisitId(job);
+  const currentCompletion = job.workerCompletions?.[workerId];
+  const completionBelongsToCurrentVisit = !currentVisitId || currentCompletion?.visitId === currentVisitId;
+  const completedByTrade = status === "completed" && completionBelongsToCurrentVisit && Boolean(currentCompletion?.submittedComplete);
   const needsAnotherTrade = Object.values(job.workerCompletions || {}).some(c => c.requiresAnotherTrade);
   const defectJob = isDefectJob(job);
   let tabClass = "neutral";
@@ -2388,7 +2405,8 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   }
 
   async function saveCompletion(job) {
-    const existing = job.workerCompletions?.[worker.id] || {};
+    const savedCompletion = job.workerCompletions?.[worker.id] || {};
+    const existing = (!getCurrentVisitId(job) || savedCompletion.visitId === getCurrentVisitId(job)) ? savedCompletion : {};
     const draft = completionDrafts[job.id] || existing;
     setCompletionSaveStatus(current => ({ ...current, [job.id]: "saving" }));
     try {
@@ -2438,12 +2456,14 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
               <h3>{formatIsoForDisplay(iso)} <span className={`roster-badge ${availability.status === "Onsite" ? "onsite" : "rnr"}`}>{availability.label}</span></h3>
               {dayJobs.map(job => {
                 const status = getCurrentWorkerStatus(job, worker.id);
+                const savedCompletion = job.workerCompletions?.[worker.id] || {};
+                const currentCompletion = (!getCurrentVisitId(job) || savedCompletion.visitId === getCurrentVisitId(job)) ? savedCompletion : {};
                 const completion = {
                   completionDescription: "",
                   materialsUsed: "",
                   requiresAnotherTrade: false,
                   followUpTrade: "",
-                  ...(job.workerCompletions?.[worker.id] || {}),
+                  ...currentCompletion,
                   ...(completionDrafts[job.id] || {})
                 };
                 return (
@@ -2747,7 +2767,8 @@ function mapJobFromSupabase(row, bookingRows = []) {
       status,
       totalMs: Number(booking.total_ms ?? payload.workerStatus?.[booking.worker_id]?.totalMs ?? 0) || 0,
       runningSince: booking.running_since ? new Date(booking.running_since).getTime() : (payload.workerStatus?.[booking.worker_id]?.runningSince || null),
-      updatedAt: booking.status_updated_at || booking.updated_at || null
+      updatedAt: booking.status_updated_at || booking.updated_at || null,
+      visitId: booking.visit_id || payload.workerStatus?.[booking.worker_id]?.visitId || null
     };
     return acc;
   }, {});
@@ -2778,8 +2799,73 @@ function mapJobFromSupabase(row, bookingRows = []) {
     startDate: payloadStart || primary?.start_date || "",
     endDate: payloadEnd || primary?.end_date || primary?.start_date || "",
     scheduleBlocks: extra.map(b => ({ id: b.id, workerId: b.worker_id || "", startDate: b.start_date || "", endDate: b.end_date || b.start_date || "" })).filter(b => b.workerId && b.startDate && b.endDate),
-    workerStatus: { ...(payload.workerStatus || {}), ...bookingWorkerStatus },
+    ...normaliseDefectVisitState({
+      payload,
+      row,
+      bookings,
+      bookingWorkerStatus
+    }),
   });
+}
+
+
+function normaliseDefectVisitState({ payload, row, bookings, bookingWorkerStatus }) {
+  const defectJob = Boolean(payload?.isDefectCallback || payload?.jobStatus === "Call back - Defects");
+  const currentVisitStartedAt = payload?.currentVisitStartedAt || "";
+  const currentVisitId = payload?.currentVisitId || (defectJob && currentVisitStartedAt ? `defect-${currentVisitStartedAt}` : "");
+  const mergedStatus = { ...(payload?.workerStatus || {}), ...(bookingWorkerStatus || {}) };
+  const priorVisits = Array.isArray(payload?.priorVisits) ? structuredCloneSafe(payload.priorVisits) : [];
+  let workerCompletions = { ...(payload?.workerCompletions || {}) };
+
+  if (defectJob && currentVisitId) {
+    workerCompletions = Object.fromEntries(
+      Object.entries(workerCompletions).filter(([, completion]) => completion?.visitId === currentVisitId)
+    );
+  }
+
+  if (!defectJob || !currentVisitId) {
+    return { currentVisitId, priorVisits, workerCompletions, workerStatus: mergedStatus };
+  }
+
+  const staleWorkerStatus = {};
+  const currentWorkerStatus = {};
+  Object.entries(mergedStatus).forEach(([workerId, state]) => {
+    if (state?.visitId === currentVisitId) {
+      currentWorkerStatus[workerId] = state;
+      return;
+    }
+    if ((Number(state?.totalMs) || 0) > 0 || (state?.status && state.status !== "notStarted") || workerCompletions?.[workerId]) {
+      staleWorkerStatus[workerId] = state;
+    }
+    currentWorkerStatus[workerId] = {
+      status: "notStarted",
+      totalMs: 0,
+      runningSince: null,
+      updatedAt: currentVisitStartedAt || new Date().toISOString(),
+      visitId: currentVisitId
+    };
+  });
+
+  const staleIds = Object.keys(staleWorkerStatus);
+  if (staleIds.length) {
+    const legacyId = `legacy-defect-${row?.id || "job"}-${currentVisitStartedAt || "visit"}`;
+    if (!priorVisits.some(visit => visit.id === legacyId)) {
+      priorVisits.push({
+        id: legacyId,
+        archivedAt: currentVisitStartedAt || new Date().toISOString(),
+        reason: "defects_callback_legacy_repair",
+        startDate: payload?.startDate || bookings?.[0]?.start_date || "",
+        endDate: payload?.endDate || bookings?.[0]?.end_date || bookings?.[0]?.start_date || "",
+        assignedTo: staleIds,
+        workerStatus: staleWorkerStatus,
+        workerCompletions: Object.fromEntries(staleIds.filter(id => workerCompletions?.[id]).map(id => [id, workerCompletions[id]])),
+        completedConfirmed: true
+      });
+    }
+    workerCompletions = Object.fromEntries(Object.entries(workerCompletions).filter(([id]) => !staleIds.includes(id)));
+  }
+
+  return { currentVisitId, priorVisits, workerCompletions, workerStatus: currentWorkerStatus };
 }
 
 function mapJobToSupabase(job) {
@@ -2829,7 +2915,8 @@ function getJobBookingsForSupabase(job) {
       booking_status: getCurrentWorkerStatus(job, workerId) || "notStarted",
       total_ms: Math.max(0, Math.round(Number(job.workerStatus?.[workerId]?.totalMs) || 0)),
       running_since: job.workerStatus?.[workerId]?.runningSince ? new Date(Number(job.workerStatus[workerId].runningSince)).toISOString() : null,
-      status_updated_at: job.workerStatus?.[workerId]?.updatedAt || new Date().toISOString()
+      status_updated_at: job.workerStatus?.[workerId]?.updatedAt || new Date().toISOString(),
+      visit_id: job.workerStatus?.[workerId]?.visitId || getCurrentVisitId(job) || null
     };
 
     // Only send an id to Supabase when it is a real UUID.
@@ -3010,7 +3097,7 @@ function mapMessageFromSupabase(row = {}) {
   };
 }
 
-async function updateAssignedBookingStatusInSupabase({ jobId, workerId, status, totalMs = 0, runningSince = null, updatedAt = null }) {
+async function updateAssignedBookingStatusInSupabase({ jobId, workerId, status, totalMs = 0, runningSince = null, updatedAt = null, visitId = null }) {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
   const timestamp = updatedAt || new Date().toISOString();
   const { data, error } = await supabase
@@ -3020,6 +3107,7 @@ async function updateAssignedBookingStatusInSupabase({ jobId, workerId, status, 
       total_ms: Math.max(0, Math.round(Number(totalMs) || 0)),
       running_since: runningSince ? new Date(Number(runningSince)).toISOString() : null,
       status_updated_at: timestamp,
+      visit_id: visitId || null,
       updated_at: timestamp
     })
     .eq("job_id", jobId)
@@ -3105,7 +3193,36 @@ async function persistJobToSupabase(job) {
     const { error: bookingError } = await supabase.from("job_bookings").insert(bookings);
     if (bookingError) throw bookingError;
   }
+  await syncArchivedVisitsToSupabase(normalised);
   return normalised;
+}
+
+async function syncArchivedVisitsToSupabase(job) {
+  if (!supabase || !isUuid(job?.id)) return;
+  const visits = Array.isArray(job.priorVisits) ? job.priorVisits : [];
+  for (const visit of visits) {
+    const visitKey = String(visit.id || "");
+    if (!visitKey) continue;
+    const workerStatus = visit.workerStatus || {};
+    const totalMs = Object.values(workerStatus).reduce((sum, state) => sum + Math.max(0, Number(state?.totalMs) || 0), 0);
+    const row = {
+      job_id: job.id,
+      visit_key: visitKey,
+      visit_type: visit.reason || "rescheduled",
+      start_date: visit.startDate || null,
+      end_date: visit.endDate || visit.startDate || null,
+      assigned_to: Array.isArray(visit.assignedTo) ? visit.assignedTo : [],
+      worker_status: workerStatus,
+      worker_completions: visit.workerCompletions || {},
+      total_ms: Math.round(totalMs),
+      completed_confirmed: Boolean(visit.completedConfirmed),
+      archived_at: visit.archivedAt || new Date().toISOString(),
+      snapshot: visit,
+      updated_at: new Date().toISOString()
+    };
+    const { error } = await supabase.from("job_visit_history").upsert(row, { onConflict: "job_id,visit_key" });
+    if (error && error.code !== "42P01") throw error;
+  }
 }
 
 async function deleteJobFromSupabase(jobId) {
@@ -3141,7 +3258,7 @@ async function insertJobHistoryToSupabase({ jobId, action, details = "", created
 
 
 function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
-function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},priorVisits:[],currentVisitStartedAt:"",completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],priorVisits:Array.isArray(job.priorVisits)?job.priorVisits:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
+function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},priorVisits:[],currentVisitId:"",currentVisitStartedAt:"",completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],priorVisits:Array.isArray(job.priorVisits)?job.priorVisits:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
 function createId(){ return globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function loadData(){ try{const saved=localStorage.getItem(STORAGE_KEY); if(!saved) return initialData; const parsed=JSON.parse(saved); return {...initialData,...parsed,teamMembers:(parsed.teamMembers||[]).map(w=>({birthday:"",sapNumber:w.employeeNumber||"",inactive:false,accessRevoked:false,customWorkStart:"",customWorkEnd:"",customRnrStart:"",customRnrEnd:"",customRepeatUntil:"",...w})),jobs:(parsed.jobs||[]).map(normaliseJob),leaveRecords:parsed.leaveRecords||[],messages:parsed.messages||[]};}catch{return initialData;} }
 function saveData(data){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
@@ -3396,13 +3513,19 @@ function sortScheduleItems(a, b){
 
 function getWorkerName(workers,id){ return workers.find(w=>w.id===id)?.name||id; }
 function getAssignedWorkerNames(workers,ids=[]){ return ids.map(id=>getWorkerName(workers,id)).join(", "); }
+function getCurrentVisitId(job){
+  if (!job || !isDefectJob(job)) return job?.currentVisitId || "";
+  return job.currentVisitId || (job.currentVisitStartedAt ? `defect-${job.currentVisitStartedAt}` : "");
+}
 function getCurrentWorkerStatus(job, workerId){
   const state = job?.workerStatus?.[workerId];
   if (!state) return "notStarted";
+  const currentVisitId = getCurrentVisitId(job);
+  if (isDefectJob(job) && currentVisitId && state.visitId !== currentVisitId) return "notStarted";
   if (isDefectJob(job) && job.currentVisitStartedAt && state.updatedAt && new Date(state.updatedAt).getTime() < new Date(job.currentVisitStartedAt).getTime()) return "notStarted";
   return state.status || "notStarted";
 }
-function getCurrentWorkerTotalMs(job,workerId){ const s=job.workerStatus?.[workerId]; if(!s) return 0; let total=Number(s.totalMs)||0; if(getCurrentWorkerStatus(job,workerId)==="running"&&s.runningSince) total+=Math.max(0,Date.now()-Number(s.runningSince)); return total; }
+function getCurrentWorkerTotalMs(job,workerId){ const s=job.workerStatus?.[workerId]; if(!s || getCurrentWorkerStatus(job,workerId)==="notStarted" && isDefectJob(job) && getCurrentVisitId(job) && s.visitId!==getCurrentVisitId(job)) return 0; let total=Number(s.totalMs)||0; if(getCurrentWorkerStatus(job,workerId)==="running"&&s.runningSince) total+=Math.max(0,Date.now()-Number(s.runningSince)); return total; }
 function getWorkerTotalMs(job,workerId){
   const archived=(job.priorVisits||[]).reduce((sum,visit)=>{ const s=visit?.workerStatus?.[workerId]; if(!s)return sum; let ms=Number(s.totalMs)||0; if(s.status==="running"&&s.runningSince&&visit.archivedAt) ms+=Math.max(0,new Date(visit.archivedAt).getTime()-Number(s.runningSince)); return sum+ms; },0);
   return archived+getCurrentWorkerTotalMs(job,workerId);
