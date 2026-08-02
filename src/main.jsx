@@ -741,6 +741,7 @@ function App() {
 
       const isTrueReschedule = wasCompleted || allExistingBookingsArePast || isMovingFromCalendar;
       if (isTrueReschedule) {
+<<<<<<< HEAD
         const resetAt = new Date().toISOString();
         const previousWorkerIds = Array.from(new Set([
           ...getAllAssignedWorkerIds(job),
@@ -778,6 +779,20 @@ function App() {
           workerCompletions: {},
           completedConfirmed: false,
           category: "Scheduled"
+=======
+        // A rescheduled visit is a fresh assignment. Do not carry a previous
+        // trade-complete state into the new booking. Historical completion
+        // details remain available in the job history.
+        const resetWorkerStatus = {};
+        getAllAssignedWorkerIds(updated).forEach(id => {
+          resetWorkerStatus[id] = { status: "notStarted", updatedAt: new Date().toISOString() };
+        });
+        updated = {
+          ...updated,
+          workerStatus: resetWorkerStatus,
+          workerCompletions: {},
+          completedConfirmed: false
+>>>>>>> 3f4c7bdd3c151c5dbddacc49f895632440f97f01
         };
       }
 
@@ -2447,7 +2462,11 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
                   ...(completionDrafts[job.id] || {})
                 };
                 return (
+<<<<<<< HEAD
                   <article key={job.id} className={`employee-job-card app-job-card ${isDefectJob(job) ? "employee-defect-job" : ""} ${status === "completed" && !isDefectJob(job) ? "employee-complete" : ""}`}>
+=======
+                  <article key={job.id} className={`employee-job-card app-job-card ${isDefectJob(job) ? "employee-defect-job" : ""} ${status === "completed" || job.category === "Completed" || job.completedConfirmed ? "employee-complete" : ""}`}>
+>>>>>>> 3f4c7bdd3c151c5dbddacc49f895632440f97f01
                     <div className="employee-job-banner">
                       <div>
                         <span className="wo">{job.workOrderNumber || job.jobNumber || "Job"}</span>
