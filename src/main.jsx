@@ -741,18 +741,43 @@ function App() {
 
       const isTrueReschedule = wasCompleted || allExistingBookingsArePast || isMovingFromCalendar;
       if (isTrueReschedule) {
-        // A rescheduled visit is a fresh assignment. Do not carry a previous
-        // trade-complete state into the new booking. Historical completion
-        // details remain available in the job history.
+        const resetAt = new Date().toISOString();
+        const previousWorkerIds = Array.from(new Set([
+          ...getAllAssignedWorkerIds(job),
+          ...Object.keys(job.workerStatus || {}),
+          ...Object.keys(job.workerCompletions || {})
+        ]));
+        const hasPreviousVisitData = previousWorkerIds.some(id =>
+          getCurrentWorkerTotalMs(job, id) > 0 ||
+          (job.workerStatus?.[id]?.status && job.workerStatus[id].status !== "notStarted") ||
+          Boolean(job.workerCompletions?.[id])
+        );
+        const priorVisits = [...(job.priorVisits || [])];
+        if (hasPreviousVisitData) {
+          priorVisits.push({
+            id: createId(),
+            archivedAt: resetAt,
+            reason: wasCompleted && isDefectCallback ? "defects_callback" : "rescheduled",
+            startDate: job.startDate || "",
+            endDate: job.endDate || job.startDate || "",
+            assignedTo: previousWorkerIds,
+            workerStatus: structuredCloneSafe(job.workerStatus || {}),
+            workerCompletions: structuredCloneSafe(job.workerCompletions || {}),
+            completedConfirmed: Boolean(job.completedConfirmed || job.category === "Completed")
+          });
+        }
         const resetWorkerStatus = {};
         getAllAssignedWorkerIds(updated).forEach(id => {
-          resetWorkerStatus[id] = { status: "notStarted", updatedAt: new Date().toISOString() };
+          resetWorkerStatus[id] = { status: "notStarted", totalMs: 0, runningSince: null, updatedAt: resetAt };
         });
         updated = {
           ...updated,
+          priorVisits,
+          currentVisitStartedAt: resetAt,
           workerStatus: resetWorkerStatus,
           workerCompletions: {},
-          completedConfirmed: false
+          completedConfirmed: false,
+          category: "Scheduled"
         };
       }
 
@@ -1086,7 +1111,19 @@ Reply: ${messageText}` };
 
     if (session && supabase && isUuid(jobId) && isUuid(workerId)) {
       try {
-        await updateAssignedBookingStatusInSupabase({ jobId, workerId, status: nextStatus });
+        const currentJob = data.jobs.find(item => item.id === jobId);
+        const priorStatus = currentJob?.workerStatus?.[workerId] || { status: "notStarted", totalMs: 0, runningSince: null };
+        const now = Date.now();
+        let totalMs = Number(priorStatus.totalMs) || 0;
+        if (priorStatus.status === "running" && priorStatus.runningSince) totalMs += now - Number(priorStatus.runningSince);
+        await updateAssignedBookingStatusInSupabase({
+          jobId,
+          workerId,
+          status: nextStatus,
+          totalMs,
+          runningSince: nextStatus === "running" ? now : null,
+          updatedAt: new Date(now).toISOString()
+        });
         await insertJobHistoryToSupabase({
           jobId,
           action: "Employee status",
@@ -2400,7 +2437,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
             <div key={iso} className="employee-day">
               <h3>{formatIsoForDisplay(iso)} <span className={`roster-badge ${availability.status === "Onsite" ? "onsite" : "rnr"}`}>{availability.label}</span></h3>
               {dayJobs.map(job => {
-                const status = job.workerStatus?.[worker.id]?.status || "notStarted";
+                const status = getCurrentWorkerStatus(job, worker.id);
                 const completion = {
                   completionDescription: "",
                   materialsUsed: "",
@@ -2410,7 +2447,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
                   ...(completionDrafts[job.id] || {})
                 };
                 return (
-                  <article key={job.id} className={`employee-job-card app-job-card ${isDefectJob(job) ? "employee-defect-job" : ""} ${status === "completed" || job.category === "Completed" || job.completedConfirmed ? "employee-complete" : ""}`}>
+                  <article key={job.id} className={`employee-job-card app-job-card ${isDefectJob(job) ? "employee-defect-job" : ""} ${status === "completed" && !isDefectJob(job) ? "employee-complete" : ""}`}>
                     <div className="employee-job-banner">
                       <div>
                         <span className="wo">{job.workOrderNumber || job.jobNumber || "Job"}</span>
@@ -2491,6 +2528,20 @@ function TravelEmployeeCard({ job }) {
 
 function buildWorkDoneSummary(job, workers = []) {
   const lines = [];
+  (job.priorVisits || []).forEach((visit, index) => {
+    const visitCompletions = visit.workerCompletions || {};
+    if (!Object.keys(visitCompletions).length) return;
+    lines.push(`Previous visit ${index + 1}${visit.startDate ? ` (${formatIsoForDisplay(visit.startDate)})` : ""}:`);
+    Object.entries(visitCompletions).forEach(([workerId, completion]) => {
+      const workerName = getWorkerName(workers, workerId);
+      const dateText = completion.updatedAt ? ` on ${formatDateTime(completion.updatedAt)}` : "";
+      lines.push(`${workerName}${dateText}:`);
+      if (completion.completionDescription) lines.push(`Works completed: ${completion.completionDescription}`);
+      if (completion.materialsUsed) lines.push(`Materials used: ${completion.materialsUsed}`);
+      if (completion.requiresAnotherTrade) lines.push(`Reassignment / follow-up requested: ${completion.followUpTrade || "Another trade required"}`);
+    });
+    lines.push("");
+  });
   const completions = job.workerCompletions || {};
   Object.entries(completions).forEach(([workerId, completion]) => {
     const workerName = getWorkerName(workers, workerId);
@@ -2694,7 +2745,9 @@ function mapJobFromSupabase(row, bookingRows = []) {
     acc[booking.worker_id] = {
       ...(payload.workerStatus?.[booking.worker_id] || {}),
       status,
-      updatedAt: booking.updated_at || null
+      totalMs: Number(booking.total_ms ?? payload.workerStatus?.[booking.worker_id]?.totalMs ?? 0) || 0,
+      runningSince: booking.running_since ? new Date(booking.running_since).getTime() : (payload.workerStatus?.[booking.worker_id]?.runningSince || null),
+      updatedAt: booking.status_updated_at || booking.updated_at || null
     };
     return acc;
   }, {});
@@ -2773,7 +2826,10 @@ function getJobBookingsForSupabase(job) {
       end_date: endDate,
       // Preserve the employee's own status when an admin reschedules or edits
       // the job. Falling back to scheduled keeps new bookings neutral.
-      booking_status: job.workerStatus?.[workerId]?.status || "scheduled"
+      booking_status: getCurrentWorkerStatus(job, workerId) || "notStarted",
+      total_ms: Math.max(0, Math.round(Number(job.workerStatus?.[workerId]?.totalMs) || 0)),
+      running_since: job.workerStatus?.[workerId]?.runningSince ? new Date(Number(job.workerStatus[workerId].runningSince)).toISOString() : null,
+      status_updated_at: job.workerStatus?.[workerId]?.updatedAt || new Date().toISOString()
     };
 
     // Only send an id to Supabase when it is a real UUID.
@@ -2954,13 +3010,17 @@ function mapMessageFromSupabase(row = {}) {
   };
 }
 
-async function updateAssignedBookingStatusInSupabase({ jobId, workerId, status }) {
+async function updateAssignedBookingStatusInSupabase({ jobId, workerId, status, totalMs = 0, runningSince = null, updatedAt = null }) {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
+  const timestamp = updatedAt || new Date().toISOString();
   const { data, error } = await supabase
     .from("job_bookings")
     .update({
       booking_status: status,
-      updated_at: new Date().toISOString()
+      total_ms: Math.max(0, Math.round(Number(totalMs) || 0)),
+      running_since: runningSince ? new Date(Number(runningSince)).toISOString() : null,
+      status_updated_at: timestamp,
+      updated_at: timestamp
     })
     .eq("job_id", jobId)
     .eq("worker_id", workerId)
@@ -3081,7 +3141,7 @@ async function insertJobHistoryToSupabase({ jobId, action, details = "", created
 
 
 function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
-function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
+function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},priorVisits:[],currentVisitStartedAt:"",completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],priorVisits:Array.isArray(job.priorVisits)?job.priorVisits:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
 function createId(){ return globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function loadData(){ try{const saved=localStorage.getItem(STORAGE_KEY); if(!saved) return initialData; const parsed=JSON.parse(saved); return {...initialData,...parsed,teamMembers:(parsed.teamMembers||[]).map(w=>({birthday:"",sapNumber:w.employeeNumber||"",inactive:false,accessRevoked:false,customWorkStart:"",customWorkEnd:"",customRnrStart:"",customRnrEnd:"",customRepeatUntil:"",...w})),jobs:(parsed.jobs||[]).map(normaliseJob),leaveRecords:parsed.leaveRecords||[],messages:parsed.messages||[]};}catch{return initialData;} }
 function saveData(data){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
@@ -3336,7 +3396,17 @@ function sortScheduleItems(a, b){
 
 function getWorkerName(workers,id){ return workers.find(w=>w.id===id)?.name||id; }
 function getAssignedWorkerNames(workers,ids=[]){ return ids.map(id=>getWorkerName(workers,id)).join(", "); }
-function getWorkerTotalMs(job,workerId){ const s=job.workerStatus?.[workerId]; if(!s) return 0; let total=s.totalMs||0; if(s.status==="running"&&s.runningSince) total+=Date.now()-s.runningSince; return total; }
+function getCurrentWorkerStatus(job, workerId){
+  const state = job?.workerStatus?.[workerId];
+  if (!state) return "notStarted";
+  if (isDefectJob(job) && job.currentVisitStartedAt && state.updatedAt && new Date(state.updatedAt).getTime() < new Date(job.currentVisitStartedAt).getTime()) return "notStarted";
+  return state.status || "notStarted";
+}
+function getCurrentWorkerTotalMs(job,workerId){ const s=job.workerStatus?.[workerId]; if(!s) return 0; let total=Number(s.totalMs)||0; if(getCurrentWorkerStatus(job,workerId)==="running"&&s.runningSince) total+=Math.max(0,Date.now()-Number(s.runningSince)); return total; }
+function getWorkerTotalMs(job,workerId){
+  const archived=(job.priorVisits||[]).reduce((sum,visit)=>{ const s=visit?.workerStatus?.[workerId]; if(!s)return sum; let ms=Number(s.totalMs)||0; if(s.status==="running"&&s.runningSince&&visit.archivedAt) ms+=Math.max(0,new Date(visit.archivedAt).getTime()-Number(s.runningSince)); return sum+ms; },0);
+  return archived+getCurrentWorkerTotalMs(job,workerId);
+}
 function formatDuration(ms){ const mins=Math.floor(ms/60000); const h=Math.floor(mins/60); const m=mins%60; return h?`${h}h ${m}m`:`${m}m`; }
 function formatBytes(bytes=0){ if(bytes<1024)return `${bytes} B`; if(bytes<1024*1024)return `${Math.round(bytes/1024)} KB`; return `${(bytes/1024/1024).toFixed(1)} MB`; }
 function isDateWithinRange(date,start,end){ return !!start&&!!end&&date.localeCompare(start)>=0&&date.localeCompare(end)<=0; }
