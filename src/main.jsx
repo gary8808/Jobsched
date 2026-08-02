@@ -348,15 +348,24 @@ function App() {
     if (!supabase || !session) return;
 
     let alive = true;
+    let refreshTimer = null;
+    let refreshSequence = 0;
 
-    async function refreshJobsAndBookings() {
-      try {
-        const freshJobs = await fetchJobsFromSupabase();
-        if (!alive) return;
-        setData(current => ({ ...current, jobs: freshJobs }));
-      } catch (err) {
-        console.error("Could not refresh jobs/bookings", err);
-      }
+    function refreshJobsAndBookings() {
+      // Saving a schedule replaces booking rows (delete then insert). Debounce
+      // the realtime events so the temporary no-bookings state cannot overwrite
+      // the calendar after a successful reschedule.
+      if (refreshTimer) clearTimeout(refreshTimer);
+      const sequence = ++refreshSequence;
+      refreshTimer = setTimeout(async () => {
+        try {
+          const freshJobs = await fetchJobsFromSupabase();
+          if (!alive || sequence !== refreshSequence) return;
+          setData(current => ({ ...current, jobs: freshJobs }));
+        } catch (err) {
+          console.error("Could not refresh jobs/bookings", err);
+        }
+      }, 350);
     }
 
     const channel = supabase
@@ -686,6 +695,10 @@ function App() {
       const sourceWorkerId = dragContext?.sourceWorkerId || "";
       const sourceDate = dragContext?.sourceDate || "";
       const isMovingFromCalendar = Boolean(sourceWorkerId && sourceDate && jobOccursForWorkerOnDate(job, sourceWorkerId, sourceDate));
+      const todayIso = getIsoDate(new Date());
+      const allExistingBookingsArePast = jobHasAnyBooking(job) &&
+        (!hasPrimaryBooking(job) || compareIsoDates(job.endDate || job.startDate, todayIso) < 0) &&
+        (job.scheduleBlocks || []).every(block => compareIsoDates(block.endDate || block.startDate, todayIso) < 0);
 
       if (wasCompleted) {
         isDefectCallback = confirm("Is this booking to address defects / a call back from the completed job?");
@@ -701,6 +714,20 @@ function App() {
       let updated;
       if (!hasPrimaryBooking(job) || wasCompleted) {
         updated = { ...job, assignedTo: [workerId], startDate: date, endDate: date, category: "Scheduled", clientAccepted: wasCompleted ? false : keepConfirmed };
+      } else if (!isMovingFromCalendar && allExistingBookingsArePast && compareIsoDates(date, todayIso) >= 0) {
+        // A scheduled job dragged from the bucket after all of its bookings have
+        // expired is a reschedule, not an additional booking. Replace the stale
+        // booking range so Supabase and the employee calendar share one clear
+        // current assignment after refresh.
+        updated = {
+          ...job,
+          assignedTo: [workerId],
+          startDate: date,
+          endDate: date,
+          scheduleBlocks: [],
+          category: "Scheduled",
+          clientAccepted: keepConfirmed
+        };
       } else if (isMovingFromCalendar) {
         updated = moveScheduledOccurrence(job, sourceWorkerId, sourceDate, workerId, date);
         updated = { ...updated, category: "Scheduled", clientAccepted: keepConfirmed };
@@ -712,6 +739,23 @@ function App() {
         updated = { ...job, assignedTo, scheduleBlocks, category: "Scheduled", clientAccepted: keepConfirmed };
       }
 
+      const isTrueReschedule = wasCompleted || allExistingBookingsArePast || isMovingFromCalendar;
+      if (isTrueReschedule) {
+        // A rescheduled visit is a fresh assignment. Do not carry a previous
+        // trade-complete state into the new booking. Historical completion
+        // details remain available in the job history.
+        const resetWorkerStatus = {};
+        getAllAssignedWorkerIds(updated).forEach(id => {
+          resetWorkerStatus[id] = { status: "notStarted", updatedAt: new Date().toISOString() };
+        });
+        updated = {
+          ...updated,
+          workerStatus: resetWorkerStatus,
+          workerCompletions: {},
+          completedConfirmed: false
+        };
+      }
+
       if (isDefectCallback) {
         updated = { ...updated, jobStatus: "Call back - Defects", isDefectCallback: true, completedConfirmed: false };
       } else if (wasCompleted) {
@@ -720,7 +764,7 @@ function App() {
         updated = { ...updated, jobStatus: updated.jobStatus || updated.category };
       }
 
-      updated = logJob(updated, wasCompleted && isDefectCallback ? "Call back - Defects" : "Scheduled", wasCompleted && isDefectCallback ? `Defect/call back booked to ${getWorkerName(data.teamMembers, workerId)} on ${date}.` : isMovingFromCalendar ? `Moved booking to ${getWorkerName(data.teamMembers, workerId)} on ${date}.` : `Booked to ${getWorkerName(data.teamMembers, workerId)} on ${date}.`);
+      updated = logJob(updated, wasCompleted && isDefectCallback ? "Call back - Defects" : "Scheduled", wasCompleted && isDefectCallback ? `Defect/call back booked to ${getWorkerName(data.teamMembers, workerId)} on ${date}.` : (isMovingFromCalendar || allExistingBookingsArePast) ? `Moved booking to ${getWorkerName(data.teamMembers, workerId)} on ${date}.` : `Booked to ${getWorkerName(data.teamMembers, workerId)} on ${date}.`);
       if (shouldOpenMessage) setTimeout(() => setEditingJob({ ...updated, _openClientTab: true, _messageMode: "reschedule" }), 10);
       return updated;
     });
@@ -1684,7 +1728,7 @@ function CalendarGrid({ days, dayMin = "230px", workers, jobs, leaveRecords, mes
 function CalendarJob({ job, workerId, date, isStart, selected, hasAnyMessage, hasUnreadMessage, onSelect, onOpenMessages, onDragStart, onEdit, onDelete, onToggleAppointmentSent, onToggleClientAccepted, onConfirmComplete }) {
   const status = job.workerStatus?.[workerId]?.status || "notStarted";
   const meta = STATUS_META[status] || STATUS_META.notStarted;
-  const completedByTrade = Object.values(job.workerStatus || {}).some(s => s.status === "completed");
+  const completedByTrade = job.workerStatus?.[workerId]?.status === "completed";
   const needsAnotherTrade = Object.values(job.workerCompletions || {}).some(c => c.requiresAnotherTrade);
   const defectJob = isDefectJob(job);
   let tabClass = "neutral";
@@ -2366,11 +2410,12 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
                   ...(completionDrafts[job.id] || {})
                 };
                 return (
-                  <article key={job.id} className={`employee-job-card app-job-card ${status === "completed" || job.category === "Completed" || job.completedConfirmed ? "employee-complete" : ""}`}>
+                  <article key={job.id} className={`employee-job-card app-job-card ${isDefectJob(job) ? "employee-defect-job" : ""} ${status === "completed" || job.category === "Completed" || job.completedConfirmed ? "employee-complete" : ""}`}>
                     <div className="employee-job-banner">
                       <div>
                         <span className="wo">{job.workOrderNumber || job.jobNumber || "Job"}</span>
                         <h4>{job.title}</h4>
+                        {isDefectJob(job) && <span className="employee-defect-pill">DEFECTS JOB</span>}
                       </div>
                       {!job.isTravelComment && <span className={`status-dot ${status}`}>{STATUS_META[status].icon} {STATUS_META[status].label}</span>}
                     </div>
