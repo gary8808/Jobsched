@@ -5,7 +5,7 @@ import {
   Plus, Search, Trash2, Pencil, X, Users, ChevronLeft, ChevronRight,
   PanelLeft, Phone, Mail, MessageSquare, Inbox, Share2, Upload,
   Play, Square, Clock, Paperclip, Package, History, CheckCircle2, UserCog,
-  AlertCircle, CalendarX, Plane, Wrench, RotateCcw, UserMinus, Settings, ZoomIn, ZoomOut, Copy, Download
+  AlertCircle, CalendarX, Plane, Wrench, RotateCcw, UserMinus, Settings, ZoomIn, ZoomOut, Copy, Download, BookOpen, ChevronUp, ChevronDown, Printer
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
@@ -15,7 +15,7 @@ import { supabase, supabaseConfig } from "./supabaseClient";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-const STORAGE_KEY = "jobsched-v40-pwa";
+const STORAGE_KEY = "aim-cg-v41-reports";
 const CURRENT_USER = "Demo User";
 
 const CATEGORIES = [
@@ -124,6 +124,8 @@ function App() {
   const [messagesOpen, setMessagesOpen] = useState(false);
   const [runSheetOpen, setRunSheetOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [reportsOpen, setReportsOpen] = useState(false);
+  const [bucketsCollapsed, setBucketsCollapsed] = useState(false);
   const [calendarPopup, setCalendarPopup] = useState(null);
   const [draggedJobId, setDraggedJobId] = useState(null);
   const [selectedBucketJobId, setSelectedBucketJobId] = useState(null);
@@ -414,6 +416,22 @@ function App() {
   }, [currentUser?.id, profileLoading, isAdminUser]);
 
   useEffect(() => {
+    if (!session || !supabase || !isAdminUser) return;
+    let active = true;
+    Promise.all([fetchEmployeeCostsFromSupabase(), fetchJobFinancialsFromSupabase()])
+      .then(([costs, financials]) => {
+        if (!active) return;
+        setData(current => ({
+          ...current,
+          teamMembers: current.teamMembers.map(worker => ({ ...worker, internalHourlyCost: costs[worker.id] ?? "" })),
+          jobs: current.jobs.map(job => ({ ...job, jobValue: financials[job.id] ?? "" }))
+        }));
+      })
+      .catch(error => console.error("Could not load admin financial data", error));
+    return () => { active = false; };
+  }, [session?.user?.id, isAdminUser]);
+
+  useEffect(() => {
     if (!currentUser || isAdminUser || !data.teamMembers.length) return;
     const email = String(currentUser.email || "").toLowerCase();
     const ownWorker = data.teamMembers.find(worker =>
@@ -585,6 +603,7 @@ function App() {
       try {
         setJobsSyncMessage("Saving job to Supabase...");
         await persistJobToSupabase(next);
+        if (isAdminUser) await saveJobFinancialToSupabase(next);
         setJobsSyncMessage(`Saved ${next.title || "job"} to Supabase.`);
       } catch (err) {
         console.error(err);
@@ -738,7 +757,10 @@ function App() {
     try {
       if (deletedWorkerIds.length) await deleteWorkersFromSupabase(deletedWorkerIds);
       await saveWorkersToSupabase(workers);
-      const freshWorkers = await fetchWorkersFromSupabase();
+      await saveEmployeeCostsToSupabase(workers);
+      const freshWorkersBase = await fetchWorkersFromSupabase();
+      const costMap = await fetchEmployeeCostsFromSupabase();
+      const freshWorkers = freshWorkersBase.map(worker => ({ ...worker, internalHourlyCost: costMap[worker.id] ?? "" }));
       setBackendWorkers(freshWorkers);
       updateData({ ...data, teamMembers: freshWorkers });
       setSupabaseCheck({
@@ -1180,16 +1202,14 @@ Reply: ${messageText}` };
 
   return (
     <div className={activeView === "admin" ? "app admin-mode" : currentUser ? "app nav-mode employee-mode" : "app"}>
-      {currentUser && <SideNav unreadMessages={unreadMessages} isAdmin={isAdminUser} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onSettings={() => setSettingsOpen(true)} />}
+      {currentUser && <SideNav unreadMessages={unreadMessages} isAdmin={isAdminUser} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onReports={() => setReportsOpen(true)} onSettings={() => setSettingsOpen(true)} />}
       <header className="topbar aim-topbar">
         <div className="brand-block">
           <img src={`${import.meta.env.BASE_URL}aim-logo.png`} alt="AIM Construction Group WA" className="aim-logo" />
-          <p>AIM Job management system - Batman Version</p>
         </div>
         {topButtons}
       </header>
 
-      {activeView === "admin" && <SupabaseTestPanel result={supabaseCheck} user={currentUser} jobsSyncMessage={jobsSyncMessage} jobsLoading={jobsLoading} />}
 
       {!currentUser ? (
         <AuthPanel onSignIn={signIn} onForgotPassword={sendPasswordReset} loading={authLoading} />
@@ -1207,8 +1227,9 @@ Reply: ${messageText}` };
             <NeedsAttentionView jobs={data.jobs} workers={data.teamMembers} days={days} leaveRecords={data.leaveRecords} messages={data.messages} activeTab={dashboardTab} setActiveTab={setDashboardTab} onOpenJob={setEditingJob} />
           ) : (
           <main className="workspace">
-            <aside className="bucket-panel">
-              <div className="bucket-title"><PanelLeft size={18}/><div><h2>Job buckets</h2><span>{filteredJobs.length} jobs displayed</span></div></div>
+            <aside className={`bucket-panel ${bucketsCollapsed ? "collapsed" : ""}`}>
+              <div className="bucket-title"><PanelLeft size={18}/><div><h2>Job buckets</h2><span>{filteredJobs.length} jobs displayed</span></div><button type="button" className="bucket-collapse-button" onClick={()=>setBucketsCollapsed(v=>!v)} aria-label={bucketsCollapsed ? "Expand job buckets" : "Collapse job buckets"}>{bucketsCollapsed ? <ChevronDown size={18}/> : <ChevronUp size={18}/>}</button></div>
+              <div className="bucket-collapsible-content">
               <label>Client filter<select value={clientFilter} onChange={e=>setClientFilter(e.target.value)}><option>All</option>{clientOptions.map(c=><option key={c}>{c}</option>)}</select></label>
               <button
                 className="primary full-width bucket-new-job pdf-drop-button"
@@ -1224,6 +1245,7 @@ Reply: ${messageText}` };
               </button>
               <div className="bucket-button-grid">{["All",...CATEGORIES].map(cat=>{const count=cat==="All"?bucketJobs.length:bucketJobs.filter(j=>j.category===cat).length;return <button key={cat} className={activeCategory===cat?"active":""} onClick={()=>setActiveCategory(cat)} onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault(); const id=getDraggedJobId(e); if(id) moveToBucket(id,cat);}}><span>{cat}</span><em>{count}</em></button>})}</div>
               <div className="selected-bucket-list">{filteredJobs.map(job=><JobCard key={job.id} job={job} workerNames={getAssignedWorkerNames(data.teamMembers, job.assignedTo)} selected={selectedBucketJobId===job.id} onSelect={()=>setSelectedBucketJobId(job.id)} onDragStart={e=>handleDragStart(e,job.id)} onEdit={()=>setEditingJob(job)} onDelete={()=>cancelOrDeleteJob(job)}/>) }{filteredJobs.length===0 && <div className="empty small">No jobs in this bucket</div>}</div>
+              </div>
             </aside>
             <section className="calendar-area">
               <section className="worker-filters"><label>Trade<select value={tradeFilter} onChange={e=>setTradeFilter(e.target.value)}><option>All</option>{TRADES.map(t=><option key={t}>{t}</option>)}</select></label><label>Base site<select value={siteFilter} onChange={e=>setSiteFilter(e.target.value)}><option>All</option>{BASE_SITES.map(s=><option key={s}>{s}</option>)}</select></label><label className="inline-check"><input type="checkbox" checked={hideUnavailable} onChange={e=>setHideUnavailable(e.target.checked)}/>Hide workers fully unavailable this week</label><div className="calendar-zoom-controls"><span>{calendarDayCount} days shown</span><button type="button" className="secondary" onClick={()=>setCalendarDayCount(count=>Math.min(14, count === 5 ? 7 : count === 7 ? 10 : 14))} disabled={calendarDayCount >= 14}><ZoomOut size={15}/> Zoom out</button><button type="button" className="secondary" onClick={()=>setCalendarDayCount(count=>Math.max(5, count === 14 ? 10 : count === 10 ? 7 : 5))} disabled={calendarDayCount <= 5}><ZoomIn size={15}/> Zoom in</button></div></section>
@@ -1259,7 +1281,8 @@ Reply: ${messageText}` };
 
       <footer className="footer-actions"><button className="ghost" onClick={()=>{if(confirm("Reset demo data?")){updateData(initialData)}}}><RotateCcw size={15}/> Reset demo data</button></footer>
 
-      {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} currentUser={currentUser} messages={data.messages} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} onReplyMessage={replyToMessage} />}
+      {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} isAdmin={isAdminUser} currentUser={currentUser} messages={data.messages} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} onReplyMessage={replyToMessage} />}
+      {reportsOpen && isAdminUser && <ReportsModal jobs={data.jobs} workers={data.teamMembers} onClose={()=>setReportsOpen(false)} />}
       {calendarPopup && <CalendarItemModal context={calendarPopup} onClose={()=>setCalendarPopup(null)} onSave={saveCalendarItem}/>} 
       {peopleOpen && isAdminUser && <PeopleModal workers={data.teamMembers} usingSupabase={Boolean(session && supabase)} saving={workersLoading} onClose={()=>setPeopleOpen(false)} onSave={async (workers)=>{
         try {
@@ -1359,7 +1382,7 @@ function AuthPanel({ onSignIn, onForgotPassword, loading }) {
   return (
     <main className="auth-page">
       <form className="auth-card" onSubmit={submit}>
-        <strong>Sign in to Jobsched</strong>
+        <strong>Sign in to AIM CG</strong>
         <p>Use the Supabase user you created, for example your Gary admin login.</p>
         <label>Email<input type="email" value={email} onChange={e => setEmail(e.target.value)} autoComplete="email" required /></label>
         <label>Password<input type="password" value={password} onChange={e => setPassword(e.target.value)} autoComplete="current-password" required /></label>
@@ -1380,12 +1403,12 @@ function PasswordSetupPanel({ mode, email, onSave, onCancel }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const heading = mode === "invite" ? "Create your Jobsched password" : mode === "recovery" ? "Reset your Jobsched password" : "Set or change your Jobsched password";
+  const heading = mode === "invite" ? "Create your AIM CG password" : mode === "recovery" ? "Reset your AIM CG password" : "Set or change your Jobsched password";
   const hint = mode === "invite"
     ? "You have accepted an invite. Create a password now so you can sign in normally next time."
     : mode === "recovery"
       ? "Your reset link has been accepted. Enter a new password to finish the reset."
-      : "Enter a new password for your current Jobsched login.";
+      : "Enter a new password for your current AIM CG login.";
 
   async function submit(e) {
     e.preventDefault();
@@ -1664,7 +1687,7 @@ function JobCard({ job, workerNames, selected, onSelect, onDragStart, onEdit, on
   );
 }
 
-function JobModal({ job, teamMembers, currentUser, messages = [], onClose, onSave, onSendMessage, onActionMessage, onReplyMessage }) {
+function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [], onClose, onSave, onSendMessage, onActionMessage, onReplyMessage }) {
   const [form, setForm] = useState(normaliseJob(job));
   const [activeTab, setActiveTab] = useState(job._openClientTab ? "client" : "details");
   const [noteInput, setNoteInput] = useState("");
@@ -1763,7 +1786,7 @@ function JobModal({ job, teamMembers, currentUser, messages = [], onClose, onSav
   }
   function submit(e){ e.preventDefault(); if(!form.title.trim()){setActiveTab("details"); alert("Please enter a job title."); return;} onSave(form); }
   return <div className="modal-backdrop"><form className="modal job-modal-tabs" onSubmit={submit}><div className="modal-header clean-modal-header"><div><h2>{job.title?"Edit job":"New job"}</h2><p>{form.jobNumber||form.workOrderNumber||form.poNumber||"Job details"}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><div className="job-tab-bar">{tabs.map(t=><button type="button" key={t} className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)}>{labelTab(t)}</button>)}</div>
-  {activeTab==="details"&&<section className="job-tab-panel"><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div><label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label></section>}
+  {activeTab==="details"&&<section className="job-tab-panel"><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div>{isAdmin && <label>Job value excluding GST ($)<input type="number" min="0" step="0.01" value={form.jobValue ?? ""} onChange={e=>update("jobValue", e.target.value === "" ? "" : Number(e.target.value))}/></label>}<label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label></section>}
   {activeTab==="scheduling"&&<section className="job-tab-panel">
     <div className="two-col"><label>Bucket / schedule category<select value={form.category} onChange={e=>setForm(cur=>{ const nextCategory = e.target.value; const keepDefect = nextCategory === "Scheduled" && cur.jobStatus === "Call back - Defects"; return { ...cur, category: nextCategory, jobStatus: keepDefect ? "Call back - Defects" : nextCategory, isDefectCallback: keepDefect }; })}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></label><label>Job status<select value={form.jobStatus || form.category || "To be scheduled"} onChange={e=>setForm(cur=>({...cur, jobStatus:e.target.value, isDefectCallback:e.target.value === "Call back - Defects"}))}>{JOB_STATUS_OPTIONS.map(c=><option key={c}>{c}</option>)}</select></label></div>
     <label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label>
@@ -1829,12 +1852,70 @@ function CalendarItemModal({ context, onClose, onSave }) {
   );
 }
 
-function SideNav({ unreadMessages, isAdmin, onShare, onMessages, onPeople, onSettings }) {
+
+function ReportsModal({ jobs, workers, onClose }) {
+  const [reportType, setReportType] = useState("completed");
+  const [startDate, setStartDate] = useState(getIsoDate(addDays(new Date(), -30)));
+  const [endDate, setEndDate] = useState(getIsoDate(new Date()));
+  const [client, setClient] = useState("All");
+  const [workerId, setWorkerId] = useState("All");
+  const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort();
+  const rows = useMemo(() => jobs.filter(job => {
+    if (job.isTravelComment || job.isAdHoc) return false;
+    const completed = job.category === "Completed" || job.completedConfirmed;
+    if (reportType === "completed" && !completed) return false;
+    if (reportType === "active" && (completed || job.category === "Cancelled")) return false;
+    if (client !== "All" && job.client !== client) return false;
+    const assigned = getAllAssignedWorkerIds(job);
+    if (workerId !== "All" && !assigned.includes(workerId)) return false;
+    const date = completed ? getJobCompletionDate(job) : (job.startDate || job.endDate || "");
+    return (!startDate || !date || date.slice(0,10) >= startDate) && (!endDate || !date || date.slice(0,10) <= endDate);
+  }).map(job => {
+    const workerIds = getAllAssignedWorkerIds(job);
+    const labourHours = workerIds.reduce((sum,id)=>sum + getWorkerTotalMs(job,id)/3600000,0);
+    const labourCost = workerIds.reduce((sum,id)=>{
+      const worker = workers.find(w=>w.id===id);
+      return sum + (getWorkerTotalMs(job,id)/3600000) * (Number(worker?.internalHourlyCost)||0);
+    },0);
+    const value = Number(job.jobValue)||0;
+    return {
+      "Job": job.title,
+      "Job number": job.jobNumber,
+      "WO": job.workOrderNumber,
+      "Quote": job.quoteNumber,
+      "PO": job.poNumber,
+      "Client": job.client,
+      "Address": job.address,
+      "Status": job.category,
+      "Completed by": workerIds.map(id=>getWorkerName(workers,id)).join(", "),
+      "Completion time": getJobCompletionDate(job) ? formatDateTime(getJobCompletionDate(job)) : "",
+      "Labour hours": Number(labourHours.toFixed(2)),
+      "Job value ex GST": value,
+      "Labour cost": Number(labourCost.toFixed(2)),
+      "Value less labour": Number((value-labourCost).toFixed(2))
+    };
+  }), [jobs, workers, reportType, startDate, endDate, client, workerId]);
+  const totals = rows.reduce((a,r)=>({hours:a.hours+r["Labour hours"], value:a.value+r["Job value ex GST"], cost:a.cost+r["Labour cost"]}),{hours:0,value:0,cost:0});
+  function exportExcel(){ const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Jobs report"); XLSX.writeFile(wb,`aim-cg-${reportType}-${startDate}-to-${endDate}.xlsx`); }
+  return <div className="modal-backdrop reports-backdrop"><div className="modal reports-modal"><div className="modal-header"><div><h2>Reports</h2><p>Admin-only operational and labour reporting.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>
+    <div className="report-filters"><label>Report<select value={reportType} onChange={e=>setReportType(e.target.value)}><option value="completed">Jobs completed</option><option value="active">Jobs active</option><option value="all">All jobs</option></select></label><label>From<input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)}/></label><label>To<input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)}/></label><label>Client<select value={client} onChange={e=>setClient(e.target.value)}><option>All</option>{clients.map(c=><option key={c}>{c}</option>)}</select></label><label>Employee<select value={workerId} onChange={e=>setWorkerId(e.target.value)}><option value="All">All</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label></div>
+    <div className="report-summary"><strong>{rows.length} jobs</strong><span>{totals.hours.toFixed(2)} labour hours</span><span>{formatMoney(totals.value)} job value</span><span>{formatMoney(totals.cost)} labour cost</span><span>{formatMoney(totals.value-totals.cost)} value less labour</span></div>
+    <div className="report-actions"><button className="secondary" onClick={()=>window.print()}><Printer size={16}/> Print / PDF</button><button className="primary" onClick={exportExcel}><Download size={16}/> Export Excel</button></div>
+    <div className="report-table-wrap"><table className="report-table"><thead><tr>{rows[0] && Object.keys(rows[0]).map(k=><th key={k}>{k}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{Object.entries(r).map(([k,v])=><td key={k}>{k.includes("value")||k.includes("cost")||k==="Value less labour"?formatMoney(v):v}</td>)}</tr>)}</tbody></table>{!rows.length&&<div className="empty">No jobs match the selected report.</div>}</div>
+  </div></div>;
+}
+
+function getAllAssignedWorkerIds(job){ return [...new Set([...(job.assignedTo||[]), ...(job.scheduleBlocks||[]).map(b=>b.workerId).filter(Boolean)])]; }
+function getJobCompletionDate(job){ const dates=Object.values(job.workerCompletions||{}).map(c=>c?.updatedAt).filter(Boolean).sort(); return dates.at(-1) || job.completedAt || ""; }
+function formatMoney(value){ return new Intl.NumberFormat("en-AU",{style:"currency",currency:"AUD"}).format(Number(value)||0); }
+
+function SideNav({ unreadMessages, isAdmin, onShare, onMessages, onPeople, onReports, onSettings }) {
   return (
     <nav className="side-nav" aria-label="Main actions">
       {isAdmin && <button title="Share" onClick={onShare}><Share2 size={22}/></button>}
       {isAdmin && <button title="Messages" onClick={onMessages} className="side-nav-message"><Inbox size={22}/>{unreadMessages > 0 && <span>{unreadMessages}</span>}</button>}
       {isAdmin && <button title="People" onClick={onPeople}><Users size={22}/></button>}
+      {isAdmin && <button title="Reports" onClick={onReports}><BookOpen size={22}/></button>}
       <button title="Settings" onClick={onSettings}><Settings size={22}/></button>
     </nav>
   );
@@ -1848,9 +1929,9 @@ function SettingsModal({ currentUser, currentRole, isAdminUser, activeView, isIn
         <div className="settings-action-list">
           {isAdminUser && <button type="button" className={activeView === "admin" ? "choice-card active" : "choice-card"} onClick={() => onSetView("admin")}><UserCog/><strong>Admin view</strong><span>Calendar, job dashboard, people and settings.</span></button>}
           <button type="button" className={activeView === "employee" ? "choice-card active" : "choice-card"} onClick={() => onSetView("employee")}><Users/><strong>Employee view</strong><span>Employee schedule, notes and job operation controls.</span></button>
-          <button type="button" className="choice-card" onClick={onInstall} disabled={isInstalledPwa}><Download/><strong>{isInstalledPwa ? "App installed" : "Install AIM Jobsched"}</strong><span>{isInstalledPwa ? "Jobsched is running as an installed app on this device." : canPromptInstall ? "Add an AIM Jobsched icon to this device." : "Show instructions to add Jobsched to the home screen."}</span></button>
+          <button type="button" className="choice-card" onClick={onInstall} disabled={isInstalledPwa}><Download/><strong>{isInstalledPwa ? "App installed" : "Install AIM CG"}</strong><span>{isInstalledPwa ? "AIM CG is running as an installed app on this device." : canPromptInstall ? "Add an AIM CG icon to this device." : "Show instructions to add AIM CG to the home screen."}</span></button>
           <button type="button" className="choice-card" onClick={onChangePassword}><Settings/><strong>Change password</strong><span>Set or update the password for this account.</span></button>
-          <button type="button" className="choice-card" onClick={onSignOut}><X/><strong>Sign out</strong><span>Log out of Jobsched on this device.</span></button>
+          <button type="button" className="choice-card" onClick={onSignOut}><X/><strong>Sign out</strong><span>Log out of AIM CG on this device.</span></button>
         </div>
       </div>
     </div>
@@ -1950,7 +2031,8 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
       inactive: false,
       accessRevoked: false,
       appRole: "employee",
-      sendInvite: false
+      sendInvite: false,
+      internalHourlyCost: ""
     };
     setItems(current => [worker, ...current]);
     setSelectedId(worker.id);
@@ -2025,7 +2107,7 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
             </div>
             <div className="two-col">
               <label>Birthday<input type="date" value={selected.birthday||""} onChange={e=>update(selected.id,"birthday",e.target.value)}/></label>
-              <label>SAP number<input value={selected.sapNumber||""} onChange={e=>update(selected.id,"sapNumber",e.target.value)}/></label>
+              <label>SAP number<input value={selected.sapNumber||""} onChange={e=>update(selected.id,"sapNumber",e.target.value)}/></label><label>Internal hourly cost ($/hr, admin only)<input type="number" min="0" step="0.01" value={selected.internalHourlyCost ?? ""} onChange={e=>update(selected.id,"internalHourlyCost",e.target.value === "" ? "" : Number(e.target.value))}/></label>
             </div>
             <div className="two-col">
               <label>Base site<select value={selected.baseSite||""} onChange={e=>update(selected.id,"baseSite",e.target.value)}><option value="">Select</option>{BASE_SITES.map(s=><option key={s}>{s}</option>)}</select></label>
@@ -2329,7 +2411,8 @@ function mapWorkerFromSupabase(row) {
     appRole: row.app_role || "employee",
     inviteStatus: row.invite_status || "",
     inviteRequested: Boolean(row.invite_requested),
-    invitedAt: row.invited_at || ""
+    invitedAt: row.invited_at || "",
+    internalHourlyCost: ""
   };
 }
 
@@ -2370,6 +2453,34 @@ function cleanAuthUrl() {
   if (typeof window === "undefined") return;
   const cleanUrl = `${window.location.origin}${import.meta.env.BASE_URL}`;
   window.history.replaceState({}, document.title, cleanUrl);
+}
+
+async function fetchEmployeeCostsFromSupabase() {
+  if (!supabase) return {};
+  const { data, error } = await supabase.from("employee_costs").select("worker_id,hourly_cost");
+  if (error) throw error;
+  return Object.fromEntries((data || []).map(row => [row.worker_id, row.hourly_cost]));
+}
+
+async function saveEmployeeCostsToSupabase(workers) {
+  if (!supabase) return;
+  const rows = workers.filter(w => isUuid(w.id)).map(w => ({ worker_id: w.id, hourly_cost: w.internalHourlyCost === "" || w.internalHourlyCost == null ? null : Number(w.internalHourlyCost), updated_at: new Date().toISOString() }));
+  if (!rows.length) return;
+  const { error } = await supabase.from("employee_costs").upsert(rows, { onConflict: "worker_id" });
+  if (error) throw error;
+}
+
+async function fetchJobFinancialsFromSupabase() {
+  if (!supabase) return {};
+  const { data, error } = await supabase.from("job_financials").select("job_id,job_value");
+  if (error) throw error;
+  return Object.fromEntries((data || []).map(row => [row.job_id, row.job_value]));
+}
+
+async function saveJobFinancialToSupabase(job) {
+  if (!supabase || !isUuid(job.id)) return;
+  const { error } = await supabase.from("job_financials").upsert({ job_id: job.id, job_value: job.jobValue === "" || job.jobValue == null ? null : Number(job.jobValue), updated_at: new Date().toISOString() }, { onConflict: "job_id" });
+  if (error) throw error;
 }
 
 async function fetchWorkersFromSupabase() {
@@ -2438,6 +2549,7 @@ function mapJobFromSupabase(row, bookingRows = []) {
     quoteNumber: row.quote_number || "",
     workOrderNumber: row.work_order_number || "",
     poNumber: row.po_number || "",
+    jobValue: "",
     notes: row.description || payload.notes || "",
     category: row.category || payload.category || "To be scheduled",
     materialsStatus: row.materials_status || payload.materialsStatus || "Not checked",
@@ -2458,8 +2570,9 @@ function mapJobFromSupabase(row, bookingRows = []) {
 
 function mapJobToSupabase(job) {
   const itemType = job.isTravelComment ? "travel_accommodation" : job.isAdHoc ? "ad_hoc" : "normal_job";
+  const { jobValue: _privateJobValue, ...publicJob } = job;
   const payload = {
-    ...job,
+    ...publicJob,
     id: job.id,
     itemType,
     updatedFromAppAt: new Date().toISOString()
@@ -2770,8 +2883,8 @@ async function insertJobHistoryToSupabase({ jobId, action, details = "", created
 }
 
 
-function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
-function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
+function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
+function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
 function createId(){ return globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function loadData(){ try{const saved=localStorage.getItem(STORAGE_KEY); if(!saved) return initialData; const parsed=JSON.parse(saved); return {...initialData,...parsed,teamMembers:(parsed.teamMembers||[]).map(w=>({birthday:"",sapNumber:w.employeeNumber||"",inactive:false,accessRevoked:false,customWorkStart:"",customWorkEnd:"",customRnrStart:"",customRnrEnd:"",customRepeatUntil:"",...w})),jobs:(parsed.jobs||[]).map(normaliseJob),leaveRecords:parsed.leaveRecords||[],messages:parsed.messages||[]};}catch{return initialData;} }
 function saveData(data){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
