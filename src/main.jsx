@@ -1,4 +1,5 @@
 
+// AIM CG v41a - reschedule persistence fix
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -2519,9 +2520,33 @@ async function deleteWorkersFromSupabase(workerIds) {
 
 function mapJobFromSupabase(row, bookingRows = []) {
   const payload = row.app_payload || {};
-  const bookings = bookingRows.filter(b => b.job_id === row.id);
-  const primary = bookings[0];
-  const extra = bookings.slice(1);
+  const bookings = bookingRows
+    .filter(b => b.job_id === row.id)
+    .sort((a, b) => String(a.start_date || "").localeCompare(String(b.start_date || "")) || String(a.id || "").localeCompare(String(b.id || "")));
+
+  // Supabase does not guarantee row order. Rebuild the main booking from the
+  // dates/workers saved in app_payload so a rescheduled job does not randomly
+  // become an "additional booking" after refresh.
+  const payloadAssigned = Array.isArray(payload.assignedTo) ? payload.assignedTo.filter(Boolean) : [];
+  const payloadStart = payload.startDate || "";
+  const payloadEnd = payload.endDate || payloadStart || "";
+  let primaryBookings = bookings.filter(b =>
+    payloadAssigned.includes(b.worker_id) &&
+    (!payloadStart || b.start_date === payloadStart) &&
+    (!payloadEnd || (b.end_date || b.start_date) === payloadEnd)
+  );
+
+  if (!primaryBookings.length && bookings.length) {
+    const first = bookings[0];
+    primaryBookings = bookings.filter(b =>
+      b.start_date === first.start_date &&
+      (b.end_date || b.start_date) === (first.end_date || first.start_date)
+    );
+  }
+
+  const primaryIds = new Set(primaryBookings.map(b => b.id));
+  const primary = primaryBookings[0] || bookings[0];
+  const extra = bookings.filter(b => !primaryIds.has(b.id));
   const bookingWorkerStatus = bookings.reduce((acc, booking) => {
     if (!booking.worker_id) return acc;
     const rawStatus = String(booking.booking_status || "notStarted").toLowerCase();
@@ -2560,9 +2585,9 @@ function mapJobFromSupabase(row, bookingRows = []) {
     completedConfirmed: Boolean(row.completed_confirmed),
     isAdHoc: itemType === "ad_hoc" || Boolean(payload.isAdHoc),
     isTravelComment: itemType === "travel_accommodation" || Boolean(payload.isTravelComment),
-    assignedTo: primary?.worker_id ? [primary.worker_id] : (payload.assignedTo || []),
-    startDate: primary?.start_date || payload.startDate || "",
-    endDate: primary?.end_date || payload.endDate || primary?.start_date || "",
+    assignedTo: primaryBookings.length ? primaryBookings.map(b => b.worker_id).filter(Boolean) : (primary?.worker_id ? [primary.worker_id] : payloadAssigned),
+    startDate: payloadStart || primary?.start_date || "",
+    endDate: payloadEnd || primary?.end_date || primary?.start_date || "",
     scheduleBlocks: extra.map(b => ({ id: b.id, workerId: b.worker_id || "", startDate: b.start_date || "", endDate: b.end_date || b.start_date || "" })).filter(b => b.workerId && b.startDate && b.endDate),
     workerStatus: { ...(payload.workerStatus || {}), ...bookingWorkerStatus },
   });
@@ -2610,7 +2635,9 @@ function getJobBookingsForSupabase(job) {
       worker_id: workerId,
       start_date: startDate,
       end_date: endDate,
-      booking_status: job.category || "scheduled"
+      // Preserve the employee's own status when an admin reschedules or edits
+      // the job. Falling back to scheduled keeps new bookings neutral.
+      booking_status: job.workerStatus?.[workerId]?.status || "scheduled"
     };
 
     // Only send an id to Supabase when it is a real UUID.
