@@ -79,6 +79,24 @@ const initialData = {
 
 const jobPersistQueues = new Map();
 
+let realtimeChannelSequence = 0;
+function uniqueRealtimeTopic(base) {
+  realtimeChannelSequence += 1;
+  const randomPart = typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+    ? crypto.randomUUID().slice(0, 8)
+    : Math.random().toString(36).slice(2, 10);
+  return `${base}-${Date.now()}-${realtimeChannelSequence}-${randomPart}`;
+}
+
+function logRealtimeStatus(label, status, error) {
+  if (status === "SUBSCRIBED") return;
+  if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") {
+    console.error(`${label} realtime subscription ${status.toLowerCase()}`, error || "No additional error details");
+  } else if (status === "CLOSED") {
+    console.info(`${label} realtime subscription closed`);
+  }
+}
+
 function App() {
   const [data, setData] = useState(loadData);
   const dataRef = useRef(data);
@@ -384,9 +402,9 @@ function App() {
     refreshWorkers();
 
     const channel = supabase
-      .channel(`workers-sync-${session.user?.id || "user"}`)
+      .channel(uniqueRealtimeTopic(`workers-sync-${session.user?.id || "user"}`))
       .on("postgres_changes", { event: "*", schema: "public", table: "workers" }, queueWorkerRefresh)
-      .subscribe();
+      .subscribe((status, error) => logRealtimeStatus("Workers", status, error));
 
     const handleFocus = () => refreshWorkers();
     const handleVisibility = () => {
@@ -435,9 +453,9 @@ function App() {
     refreshMessages();
 
     const channel = supabase
-      .channel(`aimcg-messages-${session.user?.id || "user"}`)
+      .channel(uniqueRealtimeTopic(`aimcg-messages-${session.user?.id || "user"}`))
       .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, refreshMessages)
-      .subscribe();
+      .subscribe((status, error) => logRealtimeStatus("Messages", status, error));
 
     const handleFocus = () => refreshMessages();
     const handleVisibility = () => {
@@ -454,8 +472,7 @@ function App() {
       clearInterval(refreshInterval);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
-      supabase.removeChannel(coreChannel);
-      supabase.removeChannel(enrichmentChannel);
+      supabase.removeChannel(channel);
     };
   }, [session?.user?.id, currentProfile?.role, currentProfile?.active]);
 
@@ -518,13 +535,13 @@ function App() {
     // tables. A missing migration or restrictive policy on an enrichment table
     // must never stop job and booking changes reaching Trade View.
     const coreChannel = supabase
-      .channel(`aimcg-jobs-core-${session.user.id}`)
+      .channel(uniqueRealtimeTopic(`aimcg-jobs-core-${session.user.id}`))
       .on("postgres_changes", { event: "*", schema: "public", table: "jobs" }, () => queueJobsRefresh())
       .on("postgres_changes", { event: "*", schema: "public", table: "job_bookings" }, () => queueJobsRefresh())
-      .subscribe();
+      .subscribe((status, error) => logRealtimeStatus("Jobs core", status, error));
 
     let enrichmentChannel = supabase
-      .channel(`aimcg-jobs-enrichment-${session.user.id}`)
+      .channel(uniqueRealtimeTopic(`aimcg-jobs-enrichment-${session.user.id}`))
       .on("postgres_changes", { event: "*", schema: "public", table: "job_notes" }, () => queueJobsRefresh())
       .on("postgres_changes", { event: "*", schema: "public", table: "attachments" }, () => queueJobsRefresh())
       .on("postgres_changes", { event: "*", schema: "public", table: "job_completion_submissions" }, () => queueJobsRefresh())
@@ -534,7 +551,7 @@ function App() {
         .on("postgres_changes", { event: "*", schema: "public", table: "job_history" }, () => queueJobsRefresh())
         .on("postgres_changes", { event: "*", schema: "public", table: "job_financials" }, () => queueJobsRefresh());
     }
-    enrichmentChannel.subscribe();
+    enrichmentChannel.subscribe((status, error) => logRealtimeStatus("Jobs enrichment", status, error));
 
     const handleFocus = () => refreshJobsNow();
     const handleVisibility = () => {
@@ -552,7 +569,8 @@ function App() {
       clearInterval(refreshInterval);
       window.removeEventListener("focus", handleFocus);
       document.removeEventListener("visibilitychange", handleVisibility);
-      supabase.removeChannel(channel);
+      supabase.removeChannel(coreChannel);
+      supabase.removeChannel(enrichmentChannel);
     };
   }, [session?.user?.id, currentProfile?.role, currentProfile?.active]);
 
@@ -569,10 +587,10 @@ function App() {
     // Realtime only delivers future changes. Load existing machinery immediately.
     refreshMachinery();
 
-    const channel = supabase.channel(`aimcg-machinery-${session.user.id}`)
+    const channel = supabase.channel(uniqueRealtimeTopic(`aimcg-machinery-${session.user.id}`))
       .on("postgres_changes", { event: "*", schema: "public", table: "machinery" }, refreshMachinery)
       .on("postgres_changes", { event: "*", schema: "public", table: "machinery_bookings" }, refreshMachinery)
-      .subscribe();
+      .subscribe((status, error) => logRealtimeStatus("Machinery", status, error));
 
     const handleFocus = () => refreshMachinery();
     const handleVisibility = () => {
@@ -612,10 +630,10 @@ function App() {
 
     refreshTools();
 
-    const channel = supabase.channel(`aimcg-tools-${session.user.id}`)
+    const channel = supabase.channel(uniqueRealtimeTopic(`aimcg-tools-${session.user.id}`))
       .on("postgres_changes", { event: "*", schema: "public", table: "tools" }, refreshTools)
       .on("postgres_changes", { event: "*", schema: "public", table: "tool_transactions" }, refreshTools)
-      .subscribe();
+      .subscribe((status, error) => logRealtimeStatus("Tools", status, error));
 
     const handleFocus = () => refreshTools();
     const handleVisibility = () => {
