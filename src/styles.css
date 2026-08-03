@@ -1817,3 +1817,11 @@ label textarea {
 .reports-page{padding:18px 20px 34px;min-width:0}.reports-page-shell{background:#fff;border:1px solid #dfe3e7;border-radius:14px;padding:18px;box-shadow:0 4px 18px rgba(0,0,0,.05);min-height:calc(100dvh - 120px)}.reports-page .report-table-wrap{max-height:calc(100dvh - 330px);overflow:auto}.reports-page .report-table{min-width:1100px}
 .manage-inventory-modal{width:min(900px,96vw);max-height:90dvh;overflow:auto}.manage-tab-body{padding:18px 4px;display:grid;gap:14px}.manage-tab-body>p{margin:0;color:#667085}.warehouse-management{grid-template-columns:minmax(280px,.8fr) minmax(320px,1.2fr);align-items:start}.warehouse-management form{border:1px solid #e1e5e9;border-radius:12px;padding:14px}.location-register{display:grid;gap:8px}.location-register>div{display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #e1e5e9;border-radius:10px;padding:11px 12px}.location-register>div>div{display:grid;gap:3px}.location-register span{color:#667085;font-size:.85rem}.trade-material-sections{display:grid;gap:14px}.trade-material-sections section{border:1px solid #e5e7eb;border-radius:9px;padding:11px;background:#fafafa}.trade-material-sections section>strong{display:block;margin-bottom:7px}.trade-material-sections p{margin:5px 0}
 @media(max-width:760px){.reports-page{padding:8px 6px 24px}.reports-page-shell{padding:10px;border-radius:9px}.reports-page .report-table-wrap{max-height:none}.manage-inventory-modal{width:100vw;height:100dvh;max-height:100dvh;border-radius:0}.warehouse-management{grid-template-columns:1fr}}
+
+/* v47 calendar space optimisation and ad hoc workflow */
+.bucket-search{width:100%;margin:8px 0 12px}.bucket-search input{min-width:0;width:100%}
+.calendar-week-controls{justify-content:flex-start;margin:8px 0 10px;flex-wrap:wrap}
+.calendar-week-controls button{min-height:36px}
+.onsite-calendar-option{margin:-2px 0 12px}
+.ad-hoc-employee-panel .note-entry{margin-top:10px}
+@media(max-width:760px){.calendar-week-controls button{flex:1 1 auto}.bucket-search{margin-bottom:10px}}

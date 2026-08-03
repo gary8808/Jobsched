@@ -1081,6 +1081,7 @@ function getDraggedJobId(e) {
       let keepConfirmed = wasConfirmed;
       let isDefectCallback = Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects");
       let shouldOpenMessage = false;
+      const skipsClientReschedule = Boolean(job.isAdHoc || job.isTravelComment);
       const sourceWorkerId = dragContext?.sourceWorkerId || "";
       const sourceDate = dragContext?.sourceDate || "";
       const isMovingFromCalendar = Boolean(sourceWorkerId && sourceDate && jobOccursForWorkerOnDate(job, sourceWorkerId, sourceDate));
@@ -1089,12 +1090,12 @@ function getDraggedJobId(e) {
         (!hasPrimaryBooking(job) || compareIsoDates(job.endDate || job.startDate, todayIso) < 0) &&
         (job.scheduleBlocks || []).every(block => compareIsoDates(block.endDate || block.startDate, todayIso) < 0);
 
-      if (wasCompleted) {
+      if (!skipsClientReschedule && wasCompleted) {
         isDefectCallback = confirm("Is this booking to address defects / a call back from the completed job?");
         if (isDefectCallback) {
           shouldOpenMessage = confirm("Do you want to open the job now to send a reschedule message to the client?");
         }
-      } else if (wasConfirmed && (!jobOccursForWorkerOnDate(job, workerId, date) || isMovingFromCalendar)) {
+      } else if (!skipsClientReschedule && wasConfirmed && (!jobOccursForWorkerOnDate(job, workerId, date) || isMovingFromCalendar)) {
         notify = confirm("This job has a confirmed appointment. Do you wish to notify the contact of the change?");
         if (!notify) keepConfirmed = confirm("Do you want to keep the appointment set as confirmed?");
         shouldOpenMessage = notify;
@@ -1634,6 +1635,21 @@ Reply: ${messageText}` };
     }
   }
 
+
+  async function addEmployeeNote(jobId, workerId, text) {
+    const noteText = String(text || "").trim();
+    if (!noteText) return;
+    const workerName = getWorkerName(dataRef.current.teamMembers, workerId);
+    const note = { id: createId(), date: new Date().toISOString(), user: workerName, workerId, text: noteText, showInTradeView: true, noteType: "employee_note" };
+    updateJobs(job => job.id === jobId
+      ? logJob({ ...job, noteHistory: [note, ...(job.noteHistory || [])] }, "Employee note", `${workerName} added a note to the ad hoc booking.`)
+      : job, { persist: false });
+    if (session && supabase && isUuid(jobId)) {
+      await insertJobNoteToSupabase({ jobId, workerId, noteText, noteType: "employee_note", createdBy: currentUser?.id || null });
+      await insertJobHistoryToSupabase({ jobId, action: "Employee note", details: `${workerName}: ${noteText}`, createdBy: currentUser?.id || null });
+    }
+  }
+
   async function saveEmployeeCompletion(jobId, workerId, completion) {
     let changedJob = null;
     let workerName = getWorkerName(dataRef.current.teamMembers, workerId);
@@ -1794,10 +1810,6 @@ Reply: ${messageText}` };
         />
       ) : activeView === "admin" ? (
         <>
-          <section className="toolbar">
-            <div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search title, client, JB, WO, PO, address..."/></div>
-            <div className="week-controls"><button className="secondary" onClick={()=>setWeekStart(addDays(weekStart,-7))}><ChevronLeft size={16}/> Previous</button><button className="secondary" onClick={()=>setWeekStart(getStartOfWeek(new Date()))}>This week</button><button className="secondary" onClick={()=>setWeekStart(addDays(weekStart,7))}>Next <ChevronRight size={16}/></button></div>
-          </section>
           <section className="admin-view-tabs">
             <button className={adminTab === "schedule" ? "active" : ""} onClick={() => setAdminTab("schedule")}>Schedule view</button>
             <button className={adminTab === "attention" ? "active" : ""} onClick={() => setAdminTab("attention")}>Job Dashboard</button>
@@ -1810,6 +1822,7 @@ Reply: ${messageText}` };
               <div className="bucket-title"><PanelLeft size={18}/><div><h2>Job buckets</h2><span>{filteredJobs.length} jobs displayed</span></div><button type="button" className="bucket-collapse-button" onClick={()=>setBucketsCollapsed(v=>!v)} aria-label={bucketsCollapsed ? "Expand job buckets" : "Collapse job buckets"}>{bucketsCollapsed ? <ChevronDown size={18}/> : <ChevronUp size={18}/>}</button></div>
               <div className="bucket-collapsible-content">
               <label>Client filter<select value={clientFilter} onChange={e=>setClientFilter(e.target.value)}><option>All</option>{clientOptions.map(c=><option key={c}>{c}</option>)}</select></label>
+              <div className="search bucket-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search jobs..."/></div>
               <button
                 className="primary full-width bucket-new-job pdf-drop-button"
                 onClick={() => setEditingJob(emptyJob())}
@@ -1828,6 +1841,7 @@ Reply: ${messageText}` };
             </aside>
             <section className="calendar-area">
               <section className="worker-filters"><label>Trade<select value={tradeFilter} onChange={e=>setTradeFilter(e.target.value)}><option>All</option>{TRADES.map(t=><option key={t}>{t}</option>)}</select></label><label>Base site<select value={siteFilter} onChange={e=>setSiteFilter(e.target.value)}><option>All</option>{BASE_SITES.map(s=><option key={s}>{s}</option>)}</select></label><label className="inline-check"><input type="checkbox" checked={hideUnavailable} onChange={e=>setHideUnavailable(e.target.checked)}/>Hide workers fully unavailable this week</label><div className="calendar-zoom-controls"><span>{calendarDayCount} days shown</span><button type="button" className="secondary" onClick={()=>setCalendarDayCount(count=>Math.min(14, count === 5 ? 7 : count === 7 ? 10 : 14))} disabled={calendarDayCount >= 14}><ZoomOut size={15}/> Zoom out</button><button type="button" className="secondary" onClick={()=>setCalendarDayCount(count=>Math.max(5, count === 14 ? 10 : count === 10 ? 7 : 5))} disabled={calendarDayCount <= 5}><ZoomIn size={15}/> Zoom in</button></div></section>
+              <div className="week-controls calendar-week-controls"><button className="secondary" onClick={()=>setWeekStart(addDays(weekStart,-7))}><ChevronLeft size={16}/> Previous</button><button className="secondary" onClick={()=>setWeekStart(getStartOfWeek(new Date()))}>This week</button><button className="secondary" onClick={()=>setWeekStart(addDays(weekStart,7))}>Next week <ChevronRight size={16}/></button></div>
               <QuickActionsBar selectedJob={selectedBooking ? data.jobs.find(j=>j.id===selectedBooking.jobId) : null} selectedBooking={selectedBooking} copiedJob={copiedBooking ? data.jobs.find(j=>j.id===copiedBooking.jobId) : null} bucketJob={selectedBucketJobId ? data.jobs.find(j=>j.id===selectedBucketJobId) : null} onCopy={copySelectedBooking} onDelete={deleteSelectedBooking} onClear={clearQuickActions} onClearBucket={()=>setSelectedBucketJobId(null)} />
               <CalendarGrid days={days} dayMin={calendarDayMin} workers={visibleWorkers} jobs={scheduledJobs} leaveRecords={data.leaveRecords} messages={data.messages} selectedJobId={selectedBucketJobId} selectedBooking={selectedBooking} copiedBooking={copiedBooking} onCellPasteBooking={pasteCopiedBooking} onCellSelectBooking={bookSelectedJob} onDropJob={scheduleJob} onDragStart={handleDragStart} onSelectBooking={selectCalendarBooking} onOpenJobMessages={setJobMessagesJob} onAddItem={setCalendarPopup} onEditJob={setEditingJob} onDeleteJob={cancelOrDeleteJob} onToggle={toggleJobCheckbox} onConfirmComplete={confirmJobComplete}/>
             </section>
@@ -1844,6 +1858,7 @@ Reply: ${messageText}` };
           leaveRecords={data.leaveRecords}
           onStatus={updateWorkerJobStatus}
           onAddAttachment={addEmployeeAttachments}
+          onAddNote={addEmployeeNote}
           onCompletion={saveEmployeeCompletion}
           canSwitchWorker={isAdminUser}
           machines={machinery}
@@ -2216,7 +2231,7 @@ function JobMessagesModal({ job, messages, onClose, onAction, onReply }) {
 function CalendarGrid({ days, dayMin = "230px", workers, jobs, leaveRecords, messages, selectedJobId, selectedBooking, copiedBooking, onCellPasteBooking, onCellSelectBooking, onDropJob, onDragStart, onSelectBooking, onOpenJobMessages, onAddItem, onEditJob, onDeleteJob, onToggle, onConfirmComplete }) {
   const dayMinNumber = Number.parseInt(dayMin, 10) || 230;
   const calendarMinWidth = 180 + (days.length * dayMinNumber);
-  return <div className="calendar-wrap"><div className="calendar-grid" data-day-count={days.length} style={{"--day-count": days.length, "--calendar-day-min": dayMin, minWidth: `${calendarMinWidth}px`}}><div className="corner-cell">Workers</div>{days.map(day=><div key={getIsoDate(day)} className={`day-header ${isToday(day)?"today":""}`}><strong>{formatDayName(day)}</strong><span>{formatDateHeader(day)}</span></div>)}{workers.map(worker=><React.Fragment key={worker.id}><div className="worker-cell"><button className="worker-profile-button" type="button"><strong>{worker.name || "Unnamed worker"}</strong><span>{worker.trade||"No trade"} · {worker.baseSite||"No site"}</span><em>{worker.sapNumber||"No SAP"}</em></button></div>{days.map(day=>{const iso=getIsoDate(day); const availability=getWorkerAvailability(worker, iso, leaveRecords); const dayLeaves=leaveRecords.filter(l=>l.workerId===worker.id && isDateWithinRange(iso,l.startDate,l.endDate)); const cellJobs=jobs.filter(j=>jobOccursForWorkerOnDate(j, worker.id, iso)).sort(sortScheduleItems); return <div key={`${worker.id}-${iso}`} className={`calendar-cell ${isToday(day)?"today-cell":""} ${availability.status==="Onsite"?"onsite-cell":"rnr-cell"}`} onDragOver={e=>{e.preventDefault(); e.dataTransfer.dropEffect="move";}} onClick={(e)=>{ if (e.target !== e.currentTarget) return; if (selectedJobId) onCellSelectBooking(worker.id, iso); else if (copiedBooking) onCellPasteBooking(worker.id, iso); }} onDrop={e=>{e.preventDefault(); const context=readDragContext(e); const id=context.jobId || e.dataTransfer.getData("text/plain"); if(id) onDropJob(id, worker.id, iso, context);}}><div className={`roster-badge ${availability.status==="Onsite"?"onsite":"rnr"}`}>{availability.label}</div><button className="add-cell-job" onClick={()=>onAddItem({workerId:worker.id,workerName:worker.name,date:iso})}><Plus size={14}/> Item</button><div className="cell-jobs">{dayLeaves.map(l=><LeaveCard key={l.id} leave={l} />)}{cellJobs.map(job=>{ const jobMessages = messages.filter(m=>m.jobId===job.id); const hasUnreadMessage = jobMessages.some(m=>m.unread && !m.actioned); const hasAnyMessage = jobMessages.length > 0; const isSelected = selectedBooking?.jobId === job.id && selectedBooking?.workerId === worker.id && selectedBooking?.date === iso; return <CalendarJob key={`${job.id}-${worker.id}-${iso}`} job={job} workerId={worker.id} date={iso} isStart={isJobOccurrenceStart(job, worker.id, iso)} selected={isSelected} hasAnyMessage={hasAnyMessage} hasUnreadMessage={hasUnreadMessage} onSelect={()=>onSelectBooking(job.id,worker.id,iso)} onOpenMessages={()=>onOpenJobMessages(job)} onDragStart={e=>onDragStart(e,job.id,worker.id,iso)} onEdit={()=>onEditJob(job)} onDelete={()=>onDeleteJob(job)} onToggleAppointmentSent={()=>onToggle(job.id,"appointmentSent")} onToggleClientAccepted={()=>onToggle(job.id,"clientAccepted")} onConfirmComplete={()=>onConfirmComplete(job.id)}/>})}</div></div>})}</React.Fragment>)}</div></div>;
+  return <div className="calendar-wrap"><div className="calendar-grid" data-day-count={days.length} style={{"--day-count": days.length, "--calendar-day-min": dayMin, minWidth: `${calendarMinWidth}px`}}><div className="corner-cell">Workers</div>{days.map(day=><div key={getIsoDate(day)} className={`day-header ${isToday(day)?"today":""}`}><strong>{formatDayName(day)}</strong><span>{formatDateHeader(day)}</span></div>)}{workers.map(worker=><React.Fragment key={worker.id}><div className="worker-cell"><button className="worker-profile-button" type="button"><strong>{worker.name || "Unnamed worker"}</strong><span>{worker.trade||"No trade"} · {worker.baseSite||"No site"}</span><em>{worker.sapNumber||"No SAP"}</em></button></div>{days.map(day=>{const iso=getIsoDate(day); const availability=getWorkerAvailability(worker, iso, leaveRecords); const dayLeaves=leaveRecords.filter(l=>l.workerId===worker.id && isDateWithinRange(iso,l.startDate,l.endDate)); const cellJobs=jobs.filter(j=>jobOccursForWorkerOnDate(j, worker.id, iso, worker, leaveRecords)).sort(sortScheduleItems); return <div key={`${worker.id}-${iso}`} className={`calendar-cell ${isToday(day)?"today-cell":""} ${availability.status==="Onsite"?"onsite-cell":"rnr-cell"}`} onDragOver={e=>{e.preventDefault(); e.dataTransfer.dropEffect="move";}} onClick={(e)=>{ if (e.target !== e.currentTarget) return; if (selectedJobId) onCellSelectBooking(worker.id, iso); else if (copiedBooking) onCellPasteBooking(worker.id, iso); }} onDrop={e=>{e.preventDefault(); const context=readDragContext(e); const id=context.jobId || e.dataTransfer.getData("text/plain"); if(id) onDropJob(id, worker.id, iso, context);}}><div className={`roster-badge ${availability.status==="Onsite"?"onsite":"rnr"}`}>{availability.label}</div><button className="add-cell-job" onClick={()=>onAddItem({workerId:worker.id,workerName:worker.name,date:iso})}><Plus size={14}/> Item</button><div className="cell-jobs">{dayLeaves.map(l=><LeaveCard key={l.id} leave={l} />)}{cellJobs.map(job=>{ const jobMessages = messages.filter(m=>m.jobId===job.id); const hasUnreadMessage = jobMessages.some(m=>m.unread && !m.actioned); const hasAnyMessage = jobMessages.length > 0; const isSelected = selectedBooking?.jobId === job.id && selectedBooking?.workerId === worker.id && selectedBooking?.date === iso; return <CalendarJob key={`${job.id}-${worker.id}-${iso}`} job={job} workerId={worker.id} date={iso} isStart={isJobOccurrenceStart(job, worker.id, iso)} selected={isSelected} hasAnyMessage={hasAnyMessage} hasUnreadMessage={hasUnreadMessage} onSelect={()=>onSelectBooking(job.id,worker.id,iso)} onOpenMessages={()=>onOpenJobMessages(job)} onDragStart={e=>onDragStart(e,job.id,worker.id,iso)} onEdit={()=>onEditJob(job)} onDelete={()=>onDeleteJob(job)} onToggleAppointmentSent={()=>onToggle(job.id,"appointmentSent")} onToggleClientAccepted={()=>onToggle(job.id,"clientAccepted")} onConfirmComplete={()=>onConfirmComplete(job.id)}/>})}</div></div>})}</React.Fragment>)}</div></div>;
 }
 
 function CalendarJob({ job, workerId, date, isStart, selected, hasAnyMessage, hasUnreadMessage, onSelect, onOpenMessages, onDragStart, onEdit, onDelete, onToggleAppointmentSent, onToggleClientAccepted, onConfirmComplete }) {
@@ -2303,7 +2318,9 @@ function JobModal({ job, teamMembers, currentUser, actorName = CURRENT_USER, isA
       ? current
       : { ...current, machineryBookings: remoteRows });
   }, [job.id, machineryBookings]);
-  const tabs = ["details","scheduling","client","notes","materials","attachments","history"];
+  const tabs = form.isAdHoc
+    ? ["details", "attachments", "history"]
+    : ["details","scheduling","client","notes","materials","attachments","history"];
   function update(field, value){ setForm({...form,[field]:value}); }
   function updateStartDate(value){
     setForm(cur => ({
@@ -2391,7 +2408,7 @@ function JobModal({ job, teamMembers, currentUser, actorName = CURRENT_USER, isA
   }
   function submit(e){ e.preventDefault(); if(!form.title.trim()){setActiveTab("details"); alert("Please enter a job title."); return;} const rows=form.machineryBookings||[]; for(const row of rows){ if(!row.machineId||!row.workerId||!row.startDate||!row.endDate){setActiveTab("scheduling");alert("Complete all machinery booking fields or remove the incomplete row.");return;} const machine=machines.find(m=>m.id===row.machineId); const storedBooking=machineryBookings.find(existing=>existing.id===row.id); const reservationUnchanged=Boolean(storedBooking&&storedBooking.machineId===row.machineId&&storedBooking.startDate===row.startDate&&(storedBooking.endDate||storedBooking.startDate)===(row.endDate||row.startDate)&&(storedBooking.period||"full_day")===(row.period||"full_day")); if(isMachineUnavailable(machine)&&!reservationUnchanged){setActiveTab("scheduling");alert(`${machineDisplayName(machine)} is unavailable and cannot be booked.`);return;} if(machineryConflict(row)){setActiveTab("scheduling");alert("A machinery booking conflicts with an existing booking.");return;} const duplicate=rows.find(other=>other.id!==row.id&&findMachineryConflict(row,[other])); if(duplicate){setActiveTab("scheduling");alert("Two machinery bookings on this job overlap for the same machine.");return;} } onSave(form); }
   return <div className="modal-backdrop"><form className="modal job-modal-tabs" onSubmit={submit}><div className="modal-header clean-modal-header"><div><h2>{job.title?"Edit job":"New job"}</h2><p>{form.jobNumber||form.workOrderNumber||form.poNumber||"Job details"}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><div className="job-tab-bar">{tabs.map(t=><button type="button" key={t} className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)}>{labelTab(t)}</button>)}</div>
-  {activeTab==="details"&&<section className="job-tab-panel"><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div>{isAdmin && <label>Job value excluding GST ($)<input type="number" min="0" step="0.01" value={form.jobValue ?? ""} onChange={e=>update("jobValue", e.target.value === "" ? "" : Number(e.target.value))}/></label>}<label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label></section>}
+  {activeTab==="details"&&<section className="job-tab-panel">{form.isAdHoc ? <label>Job description<textarea rows="8" value={form.notes||""} onChange={e=>update("notes",e.target.value)} placeholder="Describe the ad hoc task..."/></label> : <><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label className="check-option plain onsite-calendar-option"><input type="checkbox" checked={Boolean(form.onlyShowWhenWorkerOnsite)} onChange={e=>update("onlyShowWhenWorkerOnsite",e.target.checked)}/>Only show on calendar if employee is onsite</label><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div>{isAdmin && <label>Job value excluding GST ($)<input type="number" min="0" step="0.01" value={form.jobValue ?? ""} onChange={e=>update("jobValue", e.target.value === "" ? "" : Number(e.target.value))}/></label>}<label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label></>}</section>}
   {activeTab==="scheduling"&&<section className="job-tab-panel">
     <div className="two-col"><label>Bucket / schedule category<select value={form.category} onChange={e=>setForm(cur=>{ const nextCategory = e.target.value; const keepDefect = nextCategory === "Scheduled" && cur.jobStatus === "Call back - Defects"; return { ...cur, category: nextCategory, jobStatus: keepDefect ? "Call back - Defects" : nextCategory, isDefectCallback: keepDefect }; })}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></label><label>Work status<input value={form.isDefectCallback ? "Call back - Defects" : "Managed automatically from schedule and Trade View"} readOnly/></label></div>
     <label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label>
@@ -2984,7 +3001,7 @@ function MessagesModal({ messages, jobs, onClose, onAction, onReply }) {
 function HistoryModal({ job, onClose }) { return <div className="modal-backdrop"><div className="modal mini-modal"><div className="modal-header"><h2>Job history</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><HistoryList items={job.jobHistory||[]} type="history"/></div></div> }
 function HistoryList({ items, onToggleTrade }) { return <div className="history-list">{items.map(i=>{const canShare=Boolean(onToggleTrade)&&!i.workerId&&!["completion","completion_follow_up","attachment_upload"].includes(i.noteType||"");return <div key={i.id}><strong>{i.action||i.user}</strong><span>{formatDateTime(i.date)} · {i.user}</span><p>{i.details||i.text}</p>{canShare&&<label className="inline-check compact-check"><input type="checkbox" checked={Boolean(i.showInTradeView)} onChange={e=>onToggleTrade(i.id,e.target.checked)}/>Show in Trade View</label>}</div>})}{!items.length&&<p>No entries yet.</p>}</div> }
 
-function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords, onStatus, onAddAttachment, onCompletion, canSwitchWorker = false, machines = [], machineryBookings = [], inventoryItems = [], inventoryLocations = [], inventoryMovements = [] }) {
+function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords, onStatus, onAddAttachment, onAddNote, onCompletion, canSwitchWorker = false, machines = [], machineryBookings = [], inventoryItems = [], inventoryLocations = [], inventoryMovements = [] }) {
   const [range, setRange] = useState("today");
   const [completionFor, setCompletionFor] = useState(null);
   const [completionDrafts, setCompletionDrafts] = useState({});
@@ -2995,7 +3012,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   const endIso = getIsoDate(days[days.length - 1]);
   const visible = jobs.filter(j =>
     j.category !== "Cancelled" &&
-    getDatesInRange(startIso, endIso).some(d => jobOccursForWorkerOnDate(j, worker?.id || "", d))
+    getDatesInRange(startIso, endIso).some(d => jobOccursForWorkerOnDate(j, worker?.id || "", d, worker, leaveRecords))
   );
   const displayDays = range === "today" ? days.slice(0, 1) : range === "tomorrow" ? days.slice(1, 2) : days;
 
@@ -3102,7 +3119,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
                     </div>
 
                     {job.isAdHoc ? (
-                      <AdHocEmployeeCard job={job} worker={worker} status={status} onStatus={onStatus} />
+                      <AdHocEmployeeCard job={job} worker={worker} status={status} onStatus={onStatus} onAddAttachment={onAddAttachment} onAddNote={onAddNote} />
                     ) : job.isTravelComment ? (
                       <TravelEmployeeCard job={job} />
                     ) : (
@@ -3145,10 +3162,21 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   );
 }
 
-function AdHocEmployeeCard({ job, worker, status, onStatus }) {
+function AdHocEmployeeCard({ job, worker, status, onStatus, onAddAttachment, onAddNote }) {
+  const [note, setNote] = useState("");
+  const [savingNote, setSavingNote] = useState(false);
+  async function saveNote(){
+    if(!note.trim()) return;
+    setSavingNote(true);
+    try { await onAddNote(job.id, worker.id, note.trim()); setNote(""); }
+    finally { setSavingNote(false); }
+  }
+  const sharedNotes = (job.noteHistory || []).filter(n => n.workerId === worker.id || n.showInTradeView);
   return (
     <div className="ad-hoc-employee-panel">
       <details open><summary>Job description</summary><pre>{job.notes || job.title}</pre></details>
+      <details><summary>Notes</summary><div className="note-entry note-entry-stacked"><textarea rows="3" value={note} onChange={e=>setNote(e.target.value)} placeholder="Add a note for this ad hoc task..."/><button type="button" className="secondary" disabled={savingNote || !note.trim()} onClick={saveNote}>{savingNote ? "Saving..." : "Add note"}</button></div>{sharedNotes.map(n=><div key={n.id} className="trade-note"><strong>{n.user}</strong><span>{formatDateTime(n.date)}</span><p>{n.text}</p></div>)}{!sharedNotes.length&&<p className="muted">No notes added.</p>}</details>
+      <details><summary>Attachments</summary><div className="photo-upload-row"><label className="secondary file-pick">Upload files<input type="file" multiple onChange={e=>onAddAttachment(job.id, worker.id, e.target.files || [])}/></label><label className="secondary file-pick">Camera<input type="file" accept="image/*" capture="environment" onChange={e=>onAddAttachment(job.id, worker.id, e.target.files || [])}/></label></div><div className="simple-list">{(job.attachments || []).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button></div>)}{!(job.attachments || []).length&&<p>No attachments added.</p>}</div></details>
       <div className="employee-actions primary-actions-row compact-employee-actions">
         <button className="secondary" onClick={() => onStatus(job.id, worker.id, status === "completed" ? "notStarted" : "completed")}><CheckCircle2 size={16}/> {status === "completed" ? "Mark incomplete" : "Complete"}</button>
       </div>
@@ -4493,6 +4521,7 @@ function normaliseJob(job = {}) {
     clientAccepted: false,
     isAdHoc: false,
     isTravelComment: false,
+    onlyShowWhenWorkerOnsite: false,
     materials: [],
     attachments: [],
     noteHistory: [],
@@ -4681,12 +4710,13 @@ function shortClientName(value = "") {
 function buildScheduleMessage(job){ return `Hi, we have been asked to undertake works to your property, currently we have the job scheduled in for the ${job.startDate||"insert schedule date"}. Please let us know if this would be suitable for you. Thanks, AIM Construction`; }
 function buildRescheduleMessage(job){ return `Hi, we need to reschedule the works to your property. We currently have the job rescheduled for the ${job.startDate||"insert new schedule date"}. Please let us know if this would be suitable for you. Thanks, AIM Construction`; }
 function buildSmsMessage(job){ return buildScheduleMessage(job); }
-function buildScheduleRows({startDate,endDate,workers,jobs,leaveRecords}){ const rows=[]; for(const date of getDatesInRange(startDate,endDate)){for(const w of workers){const a=getWorkerAvailability(w,date,leaveRecords); const js=jobs.filter(j=>jobOccursForWorkerOnDate(j,w.id,date)); if(!js.length) rows.push({Date:date,Worker:w.name,Status:a.label,Title:"",Address:""}); js.forEach(j=>rows.push({Date:date,Worker:w.name,Status:a.label,Title:j.title,Address:j.address,Site:j.site,Trade:jobTradeText(j),Materials:j.materialsStatus,WO:j.workOrderNumber,PO:j.poNumber}));}} return rows; }
+function buildScheduleRows({startDate,endDate,workers,jobs,leaveRecords}){ const rows=[]; for(const date of getDatesInRange(startDate,endDate)){for(const w of workers){const a=getWorkerAvailability(w,date,leaveRecords); const js=jobs.filter(j=>jobOccursForWorkerOnDate(j,w.id,date,w,leaveRecords)); if(!js.length) rows.push({Date:date,Worker:w.name,Status:a.label,Title:"",Address:""}); js.forEach(j=>rows.push({Date:date,Worker:w.name,Status:a.label,Title:j.title,Address:j.address,Site:j.site,Trade:jobTradeText(j),Materials:j.materialsStatus,WO:j.workOrderNumber,PO:j.poNumber}));}} return rows; }
 
 function hasPrimaryBooking(job){ return Boolean(job?.startDate && job?.endDate && Array.isArray(job.assignedTo) && job.assignedTo.length); }
 function jobHasAnyBooking(job){ return hasPrimaryBooking(job) || (Array.isArray(job?.scheduleBlocks) && job.scheduleBlocks.some(b => b.workerId && b.startDate && b.endDate)); }
-function jobOccursForWorkerOnDate(job, workerId, iso){
+function jobOccursForWorkerOnDate(job, workerId, iso, worker = null, leaveRecords = []){
   if (!job || !workerId || !iso) return false;
+  if (job.onlyShowWhenWorkerOnsite && worker && getWorkerAvailability(worker, iso, leaveRecords).status !== "Onsite") return false;
   if ((job.assignedTo || []).includes(workerId) && isDateWithinRange(iso, job.startDate, job.endDate)) return true;
   return (job.scheduleBlocks || []).some(b => b.workerId === workerId && isDateWithinRange(iso, b.startDate, b.endDate));
 }
