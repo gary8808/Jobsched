@@ -1797,3 +1797,15 @@ label textarea {
 /* v43e consolidated sync controls */
 .machinery-toolbar .machinery-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
 @media(max-width:800px){.machinery-toolbar{flex-wrap:wrap}.machinery-toolbar .machinery-toolbar-actions{width:100%;justify-content:flex-start;flex-wrap:wrap}}
+
+/* AIM CG v44: inventory, stores permission and standalone machinery */
+.inventory-page{padding:18px 20px 34px;min-width:0}
+.inventory-shell{background:#fff;border:1px solid #dfe3e7;border-radius:14px;padding:18px;box-shadow:0 4px 18px rgba(0,0,0,.05)}
+.inventory-header{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;margin-bottom:16px}
+.inventory-header h1{display:flex;align-items:center;gap:9px;margin:0 0 4px;font-size:1.5rem}.inventory-header p{margin:0;color:#66707a}
+.inventory-toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}.inventory-toolbar .search{flex:1 1 360px}
+.file-button{position:relative;overflow:hidden;display:inline-flex;align-items:center;gap:7px}.file-button input{position:absolute;inset:0;opacity:0;cursor:pointer}
+.inventory-summary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:12px 0 16px}.inventory-summary article{border:1px solid #e1e5e9;border-radius:12px;padding:13px;background:#fafbfc;display:grid;gap:3px}.inventory-summary strong{font-size:1.25rem}.inventory-summary span{font-size:.8rem;color:#66707a;font-weight:800}
+.inventory-table-wrap{overflow:auto;border:1px solid #e1e5e9;border-radius:12px}.inventory-table{width:100%;border-collapse:collapse;min-width:980px}.inventory-table th,.inventory-table td{padding:11px 12px;border-bottom:1px solid #edf0f2;text-align:left;vertical-align:top}.inventory-table th{background:#f5f7f8;font-size:.78rem;text-transform:uppercase;letter-spacing:.03em}.inventory-table td small{display:block;color:#69737e;margin-top:3px}.low-stock-row{background:#fff4f2}.inventory-item-link,.machine-name-link{appearance:none;border:0;background:transparent;padding:0;color:#8d1f18;font:inherit;font-weight:900;text-align:left;cursor:pointer;text-decoration:underline;text-underline-offset:3px}.qr-provision{display:inline-flex;align-items:center;gap:6px;font-size:.78rem;font-weight:800;max-width:150px;overflow-wrap:anywhere}.inventory-item-modal{width:min(850px,96vw)}
+.employee-order-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:10px 0}.employee-order-controls strong{margin-right:4px}.message-card-actions{display:flex;gap:8px;align-items:flex-start;flex-wrap:wrap}.machine-name-link{display:block}.machinery-calendar-grid .machine-cell{align-content:start}
+@media(max-width:760px){.inventory-page{padding:8px 6px 24px}.inventory-shell{padding:10px;border-radius:9px}.inventory-header{align-items:flex-start}.inventory-header h1{font-size:1.25rem}.inventory-summary{grid-template-columns:1fr}.inventory-toolbar>*{width:100%}.inventory-toolbar .inline-check{width:auto}.inventory-item-modal{width:100vw;height:100dvh;max-height:100dvh;border-radius:0;overflow:auto}}

@@ -6,7 +6,7 @@ import {
   Plus, Search, Trash2, Pencil, X, Users, ChevronLeft, ChevronRight,
   PanelLeft, Phone, Mail, MessageSquare, Inbox, Share2, Upload,
   Play, Square, Clock, Paperclip, Package, History, CheckCircle2, UserCog,
-  AlertCircle, CalendarX, CalendarDays, Plane, Wrench, RotateCcw, UserMinus, Settings, ZoomIn, ZoomOut, Copy, Download, BookOpen, ChevronUp, ChevronDown, Printer, Tractor, Hammer, Ban, ClipboardList, SlidersHorizontal
+  AlertCircle, CalendarX, CalendarDays, Plane, Wrench, RotateCcw, UserMinus, Settings, ZoomIn, ZoomOut, Copy, Download, BookOpen, ChevronUp, ChevronDown, Printer, Tractor, Hammer, Ban, ClipboardList, SlidersHorizontal, Forklift, QrCode, ArrowUp, ArrowDown, Warehouse, PackagePlus
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
@@ -103,6 +103,7 @@ function App() {
   const workerRefreshSequence = useRef(0);
   const machineryRefreshSequence = useRef(0);
   const toolRefreshSequence = useRef(0);
+  const inventoryRefreshSequence = useRef(0);
   dataRef.current = data;
   const [view, setView] = useState("admin");
   const [adminTab, setAdminTab] = useState("schedule");
@@ -134,6 +135,11 @@ function App() {
   const [toolHistory, setToolHistory] = useState([]);
   const [toolWorkerDirectory, setToolWorkerDirectory] = useState([]);
   const [toolsOpen, setToolsOpen] = useState(false);
+  const [inventoryOpen, setInventoryOpen] = useState(false);
+  const [machineryOpen, setMachineryOpen] = useState(false);
+  const [inventoryItems, setInventoryItems] = useState([]);
+  const [inventoryLocations, setInventoryLocations] = useState([]);
+  const [inventoryMovements, setInventoryMovements] = useState([]);
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [bucketsCollapsed, setBucketsCollapsed] = useState(false);
   const [calendarPopup, setCalendarPopup] = useState(null);
@@ -190,6 +196,24 @@ function App() {
       throw machineResult.reason || bookingResult.reason || new Error("Could not refresh machinery.");
     }
     return true;
+  }
+
+  async function refreshInventoryData() {
+    if (!supabase) return false;
+    const sequence = ++inventoryRefreshSequence.current;
+    const [itemsResult, locationsResult, movementsResult] = await Promise.allSettled([
+      fetchInventoryItemsFromSupabase(),
+      fetchInventoryLocationsFromSupabase(),
+      fetchInventoryMovementsFromSupabase()
+    ]);
+    if (sequence !== inventoryRefreshSequence.current) return false;
+    if (itemsResult.status === "fulfilled") setInventoryItems(itemsResult.value);
+    else console.error("Could not refresh inventory items", itemsResult.reason);
+    if (locationsResult.status === "fulfilled") setInventoryLocations(locationsResult.value);
+    else console.error("Could not refresh inventory locations", locationsResult.reason);
+    if (movementsResult.status === "fulfilled") setInventoryMovements(movementsResult.value);
+    else console.error("Could not refresh inventory movements", movementsResult.reason);
+    return itemsResult.status === "fulfilled" || locationsResult.status === "fulfilled";
   }
 
   async function refreshToolData() {
@@ -711,8 +735,29 @@ function App() {
 
   const currentRole = currentProfile?.role === "admin" ? "admin" : "employee";
   const isAdminUser = currentRole === "admin" && currentProfile?.active !== false;
+  const linkedCurrentWorker = data.teamMembers.find(worker => worker.profileId === currentUser?.id) || data.teamMembers.find(worker => worker.email && worker.email.toLowerCase() === String(currentUser?.email || "").toLowerCase());
+  const hasStoresPermission = isAdminUser || Boolean(linkedCurrentWorker?.storesPermission);
   const activeView = isAdminUser ? view : "employee";
   const currentActorName = currentProfile?.full_name || currentUser?.email || CURRENT_USER;
+
+  const inventoryBalances = useMemo(() => calculateInventoryBalances(inventoryItems, inventoryMovements), [inventoryItems, inventoryMovements]);
+  const lowStockCount = inventoryItems.filter(item => item.active !== false && (inventoryBalances[item.id] || 0) <= Number(item.minimumQuantity || 0)).length;
+
+  useEffect(() => {
+    if (!session || !supabase || !hasStoresPermission) return;
+    refreshInventoryData().catch(error => console.warn("Could not preload inventory alerts", error));
+  }, [session?.user?.id, hasStoresPermission]);
+
+  useEffect(() => {
+    if (!inventoryOpen || !supabase || !session || !hasStoresPermission) return;
+    refreshInventoryData().catch(error => console.error("Could not open inventory data", error));
+    const channel = supabase.channel(uniqueRealtimeTopic(`aimcg-inventory-${session.user.id}`))
+      .on("postgres_changes", { event: "*", schema: "public", table: "inventory_items" }, refreshInventoryData)
+      .on("postgres_changes", { event: "*", schema: "public", table: "inventory_locations" }, refreshInventoryData)
+      .on("postgres_changes", { event: "*", schema: "public", table: "inventory_movements" }, refreshInventoryData)
+      .subscribe((status,error)=>logRealtimeStatus("Inventory",status,error));
+    return () => { supabase.removeChannel(channel); };
+  }, [inventoryOpen, session?.user?.id, hasStoresPermission]);
 
   useEffect(() => {
     if (!currentUser || profileLoading) return;
@@ -764,7 +809,7 @@ function App() {
       const matchesSite = siteFilter === "All" || worker.baseSite === siteFilter;
       const unavailableAllWeek = days.every(day => getWorkerAvailability(worker, getIsoDate(day), data.leaveRecords).status !== "Onsite");
       return matchesTrade && matchesSite && (!hideUnavailable || !unavailableAllWeek);
-    });
+    }).sort((a,b) => (Number(a.calendarOrder) || 0) - (Number(b.calendarOrder) || 0) || String(a.name || "").localeCompare(String(b.name || "")));
   }, [data.teamMembers, data.leaveRecords, days, tradeFilter, siteFilter, hideUnavailable]);
 
   const bucketJobs = useMemo(() => data.jobs.filter(job => !job.isAdHoc && !job.isTravelComment), [data.jobs]);
@@ -1690,7 +1735,7 @@ Reply: ${messageText}` };
 
   return (
     <div className={activeView === "admin" ? "app admin-mode" : currentUser ? "app nav-mode employee-mode" : "app"}>
-      {currentUser && <SideNav unreadMessages={unreadMessages} isAdmin={isAdminUser} onCalendar={() => { setToolsOpen(false); if (isAdminUser) setAdminTab("schedule"); }} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onReports={() => setReportsOpen(true)} onTools={() => setToolsOpen(true)} onSettings={() => setSettingsOpen(true)} />}
+      {currentUser && <SideNav unreadMessages={unreadMessages} lowStockCount={lowStockCount} isAdmin={isAdminUser} hasStoresPermission={hasStoresPermission} onCalendar={() => { setToolsOpen(false); setInventoryOpen(false); setMachineryOpen(false); if (isAdminUser) setAdminTab("schedule"); }} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onReports={() => setReportsOpen(true)} onTools={() => {setInventoryOpen(false);setMachineryOpen(false);setToolsOpen(true);}} onInventory={() => {setToolsOpen(false);setMachineryOpen(false);setInventoryOpen(true);}} onMachinery={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(true);}} onSettings={() => setSettingsOpen(true)} />}
       <header className="topbar aim-topbar">
         <div className="brand-block">
           <img src={`${import.meta.env.BASE_URL}aim-logo.png`} alt="AIM Construction Group WA" className="aim-logo" />
@@ -1701,6 +1746,10 @@ Reply: ${messageText}` };
 
       {!currentUser ? (
         <AuthPanel onSignIn={signIn} onForgotPassword={sendPasswordReset} loading={authLoading} />
+      ) : inventoryOpen && hasStoresPermission ? (
+        <InventoryPage items={inventoryItems} locations={inventoryLocations} movements={inventoryMovements} jobs={data.jobs} isAdmin={isAdminUser} currentUser={currentUser} onClose={()=>setInventoryOpen(false)} onRefresh={refreshInventoryData} />
+      ) : machineryOpen && isAdminUser ? (
+        <MachineryPage machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} days={days} onClose={()=>setMachineryOpen(false)} onAddBooking={(context)=>setMachineryBookingOpen(context)} onEditBooking={(booking)=>setMachineryBookingOpen({booking})} onRefresh={refreshMachineryData} onSaveMachine={async machine=>{await saveSingleMachineryToSupabase(machine);await refreshMachineryData();}} onDeleteMachine={async id=>{await deleteMachineryFromSupabase(id);await refreshMachineryData();}} />
       ) : toolsOpen ? (
         <ToolRegisterPage
           tools={tools}
@@ -1719,13 +1768,10 @@ Reply: ${messageText}` };
           </section>
           <section className="admin-view-tabs">
             <button className={adminTab === "schedule" ? "active" : ""} onClick={() => setAdminTab("schedule")}>Schedule view</button>
-            <button className={adminTab === "machinery" ? "active" : ""} onClick={() => setAdminTab("machinery")}>Machinery</button>
             <button className={adminTab === "attention" ? "active" : ""} onClick={() => setAdminTab("attention")}>Job Dashboard</button>
           </section>
           {adminTab === "attention" ? (
             <NeedsAttentionView jobs={data.jobs} workers={data.teamMembers} days={days} leaveRecords={data.leaveRecords} messages={data.messages} activeTab={dashboardTab} setActiveTab={setDashboardTab} onOpenJob={setEditingJob} />
-          ) : adminTab === "machinery" ? (
-            <MachineryView machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} days={days} selectedMachineId={selectedMachineId} setSelectedMachineId={setSelectedMachineId} onAddBooking={(context)=>setMachineryBookingOpen(context)} onEditBooking={(booking)=>setMachineryBookingOpen({ booking })} onRefresh={refreshMachineryData} />
           ) : (
           <main className="workspace">
             <aside className={`bucket-panel ${bucketsCollapsed ? "collapsed" : ""}`}>
@@ -1783,7 +1829,7 @@ Reply: ${messageText}` };
       )}
 
       {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} isAdmin={isAdminUser} currentUser={currentUser} actorName={currentActorName} messages={data.messages} machines={machinery} machineryBookings={machineryBookings} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} onReplyMessage={replyToMessage} />}
-      {reportsOpen && isAdminUser && <ReportsModal jobs={data.jobs} workers={data.teamMembers} onClose={()=>setReportsOpen(false)} />}
+      {reportsOpen && isAdminUser && <ReportsModal jobs={data.jobs} workers={data.teamMembers} inventoryItems={inventoryItems} inventoryLocations={inventoryLocations} inventoryMovements={inventoryMovements} onClose={()=>setReportsOpen(false)} />}
       {machinerySettingsOpen && isAdminUser && <MachinerySettingsModal machines={machinery} onClose={()=>setMachinerySettingsOpen(false)} onSave={async(items)=>{try{await saveMachineryToSupabase(items);await refreshMachineryData();setMachinerySettingsOpen(false);}catch(err){alert(err.message||"Could not save machinery");}}} />}
       {machineryBookingOpen && isAdminUser && <MachineryBookingModal context={machineryBookingOpen} machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} onClose={()=>setMachineryBookingOpen(null)} onSave={async(booking)=>{try{await saveMachineryBookingToSupabase(booking);await refreshMachineryData();setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not save machinery booking");}}} onDelete={async(id)=>{if(!confirm("Delete this machinery booking?"))return;try{await deleteMachineryBookingFromSupabase(id);await refreshMachineryData();setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not delete machinery booking");}}} />}
       {calendarPopup && <CalendarItemModal context={calendarPopup} onClose={()=>setCalendarPopup(null)} onSave={saveCalendarItem}/>} 
@@ -2383,12 +2429,12 @@ function MachineryView({ machines, bookings, jobs, workers, days, selectedMachin
   const activeMachines = machines.filter(m=>m.active!==false && m.status!=="inactive");
   return <main className="workspace machinery-workspace">
     <aside className="machinery-list-panel"><div className="bucket-title"><Tractor size={18}/><div><h2>Machinery</h2><span>{activeMachines.length} assets</span></div></div><div className="machine-list">{activeMachines.map(machine=><button key={machine.id} className={selectedMachineId===machine.id?"machine-list-item active":"machine-list-item"} onClick={()=>setSelectedMachineId(machine.id)}><strong>{machineDisplayName(machine)}</strong><span>{machine.registration||"No registration"}</span>{isMachineUnavailable(machine)&&<em>{machine.status==="inactive"?"Inactive":"Out of service"}</em>}</button>)}{!activeMachines.length&&<div className="empty small">Add machinery in Settings.</div>}</div></aside>
-    <section className="calendar-area"><div className="machinery-toolbar"><div><strong>Machinery calendar</strong><span>AM, PM and full-day availability</span></div><div className="machinery-toolbar-actions"><button className="secondary" type="button" onClick={onRefresh}><RotateCcw size={15}/> Refresh</button><button className="primary" type="button" onClick={()=>onAddBooking({machineId:selectedMachineId,date:getIsoDate(new Date())})}><Plus size={15}/> Ad hoc booking</button></div></div><MachineryCalendar machines={selectedMachineId?activeMachines.filter(m=>m.id===selectedMachineId):activeMachines} bookings={bookings} jobs={jobs} workers={workers} days={days} onAddBooking={onAddBooking} onEditBooking={onEditBooking}/></section>
+    <section className="calendar-area"><div className="machinery-toolbar"><div><strong>Machinery calendar</strong><span>AM, PM and full-day availability</span></div><div className="machinery-toolbar-actions"><button className="secondary" type="button" onClick={onRefresh}><RotateCcw size={15}/> Refresh</button><button className="primary" type="button" onClick={()=>onAddBooking({machineId:selectedMachineId,date:getIsoDate(new Date())})}><Plus size={15}/> Ad hoc booking</button></div></div><MachineryCalendar machines={selectedMachineId?activeMachines.filter(m=>m.id===selectedMachineId):activeMachines} bookings={bookings} jobs={jobs} workers={workers} days={days} onAddBooking={onAddBooking} onEditBooking={onEditBooking} onEditMachine={()=>{}}/></section>
   </main>;
 }
 
-function MachineryCalendar({ machines, bookings, jobs, workers, days, onAddBooking, onEditBooking }) {
-  return <div className="calendar-wrap machinery-calendar-wrap"><div className="machinery-calendar-grid" style={{"--day-count":days.length}}><div className="corner-cell">Machine</div>{days.map(day=><div key={getIsoDate(day)} className={`day-header ${isToday(day)?"today":""}`}><strong>{formatDayName(day)}</strong><span>{formatDateHeader(day)}</span></div>)}{machines.map(machine=><React.Fragment key={machine.id}><div className={`worker-cell machine-cell ${isMachineUnavailable(machine)?"out-of-service":""}`}><strong>{machineDisplayName(machine)}</strong><span>{machine.registration||machine.baseLocation||""}</span>{isMachineUnavailable(machine)&&<em>{machine.status==="inactive"?"Inactive":"Out of service"}</em>}</div>{days.map(day=>{const date=getIsoDate(day);const dayBookings=bookings.filter(b=>b.machineId===machine.id&&isDateWithinRange(date,b.startDate,b.endDate));return <div key={`${machine.id}-${date}`} className={`machinery-day-cell ${isMachineUnavailable(machine)?"blocked":""}`}><div className="machinery-period am"><span>AM</span>{renderMachinerySlot(machine,date,"am",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div><div className="machinery-period pm"><span>PM</span>{renderMachinerySlot(machine,date,"pm",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div></div>})}</React.Fragment>)}</div></div>;
+function MachineryCalendar({ machines, bookings, jobs, workers, days, onAddBooking, onEditBooking, onEditMachine }) {
+  return <div className="calendar-wrap machinery-calendar-wrap"><div className="machinery-calendar-grid" style={{"--day-count":days.length}}><div className="corner-cell">Machine</div>{days.map(day=><div key={getIsoDate(day)} className={`day-header ${isToday(day)?"today":""}`}><strong>{formatDayName(day)}</strong><span>{formatDateHeader(day)}</span></div>)}{machines.map(machine=><React.Fragment key={machine.id}><div className={`worker-cell machine-cell ${isMachineUnavailable(machine)?"out-of-service":""}`}><button type="button" className="machine-name-link" onClick={()=>onEditMachine?.(machine)}>{machineDisplayName(machine)}</button><span>{machine.registration||machine.baseLocation||""}</span>{isMachineUnavailable(machine)&&<em>{machine.status==="inactive"?"Inactive":"Out of service"}</em>}</div>{days.map(day=>{const date=getIsoDate(day);const dayBookings=bookings.filter(b=>b.machineId===machine.id&&isDateWithinRange(date,b.startDate,b.endDate));return <div key={`${machine.id}-${date}`} className={`machinery-day-cell ${isMachineUnavailable(machine)?"blocked":""}`}><div className="machinery-period am"><span>AM</span>{renderMachinerySlot(machine,date,"am",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div><div className="machinery-period pm"><span>PM</span>{renderMachinerySlot(machine,date,"pm",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div></div>})}</React.Fragment>)}</div></div>;
 }
 function renderMachinerySlot(machine,date,period,dayBookings,jobs,workers,onAddBooking,onEditBooking){
   if(isMachineUnavailable(machine)) return <span className="machine-blocked-label">Unavailable</span>;
@@ -2416,14 +2462,15 @@ function MachineryBookingModal({ context, machines, bookings, jobs, workers, onC
  return <div className="modal-backdrop"><form className="modal machinery-booking-modal" onSubmit={submit}><div className="modal-header"><div><h2>{existing?"Edit machinery booking":"New machinery booking"}</h2><p>AM, PM or full-day booking.</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><label>Machine<select value={form.machineId} onChange={e=>update("machineId",e.target.value)}><option value="">Select machine</option>{machines.filter(m=>m.active!==false && m.status!=="inactive").map(m=><option key={m.id} value={m.id} disabled={isMachineUnavailable(m)}>{machineDisplayName(m)}{isMachineUnavailable(m)?" — Unavailable":""}</option>)}</select></label><div className="two-col"><label>Booking type<select value={form.bookingType} onChange={e=>update("bookingType",e.target.value)}><option value="ad_hoc">Ad hoc</option><option value="maintenance">Maintenance</option><option value="repairs">Repairs</option><option value="job">Job</option></select></label><label>Employee<select value={form.workerId||""} onChange={e=>update("workerId",e.target.value)}><option value="">Unassigned</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label></div>{form.bookingType==="job"?<label>Job<select value={form.jobId||""} onChange={e=>update("jobId",e.target.value)}><option value="">Select job</option>{jobs.filter(j=>j.category!=="Cancelled").map(j=><option key={j.id} value={j.id}>{j.title}</option>)}</select></label>:<label>Description<textarea rows="3" value={form.description||""} onChange={e=>update("description",e.target.value)} placeholder="Enter maintenance, repairs or ad hoc details"/></label>}<div className="two-col"><label>Start<input type="date" value={form.startDate} onChange={e=>update("startDate",e.target.value)}/></label><label>End<input type="date" value={form.endDate} onChange={e=>update("endDate",e.target.value)}/></label></div><label>Period<select value={form.period} onChange={e=>update("period",e.target.value)}><option value="am">AM</option><option value="pm">PM</option><option value="full_day">Full day</option></select></label>{existing&&<div className="booking-audit-summary"><strong>Booking history</strong><span>Created: {formatDateTime(form.createdAt)}</span><span>Last updated: {formatDateTime(form.updatedAt)}</span></div>}{conflict&&<div className="defect-warning"><strong>Booking conflict</strong><span>This machine is already booked during the selected period.</span></div>}<div className="modal-actions">{existing&&<button type="button" className="danger" onClick={()=>onDelete(form.id)}>Delete</button>}<button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary">Save booking</button></div></form></div>;
 }
 
-function ReportsModal({ jobs, workers, onClose }) {
+function ReportsModal({ jobs, workers, inventoryItems = [], inventoryLocations = [], inventoryMovements = [], onClose }) {
   const [reportType, setReportType] = useState("completed");
   const [startDate, setStartDate] = useState(getIsoDate(addDays(new Date(), -30)));
   const [endDate, setEndDate] = useState(getIsoDate(new Date()));
   const [client, setClient] = useState("All");
   const [workerId, setWorkerId] = useState("All");
   const clients = [...new Set(jobs.map(j=>j.client).filter(Boolean))].sort();
-  const rows = useMemo(() => jobs.filter(job => {
+  const inventoryMode = reportType.startsWith("inventory_");
+  const jobRows = useMemo(() => jobs.filter(job => {
     if (job.isTravelComment || job.isAdHoc) return false;
     const completed = job.category === "Completed" || job.completedConfirmed;
     if (reportType === "completed" && !completed) return false;
@@ -2442,31 +2489,13 @@ function ReportsModal({ jobs, workers, onClose }) {
       return sum + (getWorkerTotalMs(job,id)/3600000) * (Number(worker?.internalHourlyCost)||0);
     },0);
     const value = Number(job.jobValue)||0;
-    return {
-      "Job": job.title,
-      "Job number": job.jobNumber,
-      "WO": job.workOrderNumber,
-      "Quote": job.quoteNumber,
-      "PO": job.poNumber,
-      "Client": job.client,
-      "Address": job.address,
-      "Status": job.category,
-      "Completed by": completedWorkerIds.map(id=>getWorkerName(workers,id)).join(", "),
-      "Completion time": getJobCompletionDate(job) ? formatDateTime(getJobCompletionDate(job)) : "",
-      "Labour hours": Number(labourHours.toFixed(2)),
-      "Job value ex GST": value,
-      "Labour cost": Number(labourCost.toFixed(2)),
-      "Value less labour": Number((value-labourCost).toFixed(2))
-    };
-  }), [jobs, workers, reportType, startDate, endDate, client, workerId]);
-  const totals = rows.reduce((a,r)=>({hours:a.hours+r["Labour hours"], value:a.value+r["Job value ex GST"], cost:a.cost+r["Labour cost"]}),{hours:0,value:0,cost:0});
-  function exportExcel(){ const ws=XLSX.utils.json_to_sheet(rows); const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,ws,"Jobs report"); XLSX.writeFile(wb,`aim-cg-${reportType}-${startDate}-to-${endDate}.xlsx`); }
-  return <div className="modal-backdrop reports-backdrop"><div className="modal reports-modal"><div className="modal-header"><div><h2>Reports</h2><p>Admin-only operational and labour reporting.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>
-    <div className="report-filters"><label>Report<select value={reportType} onChange={e=>setReportType(e.target.value)}><option value="completed">Jobs completed</option><option value="active">Jobs active</option><option value="all">All jobs</option></select></label><label>From<input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)}/></label><label>To<input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)}/></label><label>Client<select value={client} onChange={e=>setClient(e.target.value)}><option>All</option>{clients.map(c=><option key={c}>{c}</option>)}</select></label><label>Employee<select value={workerId} onChange={e=>setWorkerId(e.target.value)}><option value="All">All</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label></div>
-    <div className="report-summary"><strong>{rows.length} jobs</strong><span>{totals.hours.toFixed(2)} labour hours</span><span>{formatMoney(totals.value)} job value</span><span>{formatMoney(totals.cost)} labour cost</span><span>{formatMoney(totals.value-totals.cost)} value less labour</span></div>
-    <div className="report-actions"><button className="secondary" onClick={()=>window.print()}><Printer size={16}/> Print / PDF</button><button className="primary" onClick={exportExcel}><Download size={16}/> Export Excel</button></div>
-    <div className="report-table-wrap"><table className="report-table"><thead><tr>{rows[0] && Object.keys(rows[0]).map(k=><th key={k}>{k}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{Object.entries(r).map(([k,v])=><td key={k}>{k.includes("value")||k.includes("cost")||k==="Value less labour"?formatMoney(v):v}</td>)}</tr>)}</tbody></table>{!rows.length&&<div className="empty">No jobs match the selected report.</div>}</div>
-  </div></div>;
+    const materialCost = inventoryMovements.filter(m=>m.jobId===job.id&&m.movementType==="job_issue").reduce((sum,m)=>sum+Number(m.totalCost||0),0) - inventoryMovements.filter(m=>m.jobId===job.id&&m.movementType==="job_return").reduce((sum,m)=>sum+Number(m.totalCost||0),0);
+    return {"Job":job.title,"Job number":job.jobNumber,"WO":job.workOrderNumber,"Quote":job.quoteNumber,"PO":job.poNumber,"Client":job.client,"Address":job.address,"Status":job.category,"Completed by":completedWorkerIds.map(id=>getWorkerName(workers,id)).join(", "),"Completion time":getJobCompletionDate(job)?formatDateTime(getJobCompletionDate(job)):"","Labour hours":Number(labourHours.toFixed(2)),"Job value ex GST":value,"Labour cost":Number(labourCost.toFixed(2)),"Inventory material cost":Number(materialCost.toFixed(2)),"Value less labour/materials":Number((value-labourCost-materialCost).toFixed(2))};
+  }), [jobs, workers, inventoryMovements, reportType, startDate, endDate, client, workerId]);
+  const rows = inventoryMode ? buildInventoryReportRows(reportType, inventoryItems, inventoryLocations, inventoryMovements, jobs) : jobRows;
+  const totals = inventoryMode ? null : jobRows.reduce((a,r)=>({hours:a.hours+r["Labour hours"],value:a.value+r["Job value ex GST"],cost:a.cost+r["Labour cost"],materials:a.materials+r["Inventory material cost"]}),{hours:0,value:0,cost:0,materials:0});
+  function exportExcel(){const ws=XLSX.utils.json_to_sheet(rows);const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,"Report");XLSX.writeFile(wb,`aim-cg-${reportType}-${startDate}-to-${endDate}.xlsx`);}
+  return <div className="modal-backdrop reports-backdrop"><div className="modal reports-modal"><div className="modal-header"><div><h2>Reports</h2><p>Operational, labour and inventory reporting.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="report-filters"><label>Report<select value={reportType} onChange={e=>setReportType(e.target.value)}><option value="completed">Jobs completed</option><option value="active">Jobs active</option><option value="all">All jobs</option><option value="inventory_stock">Inventory stock on hand</option><option value="inventory_low">Inventory low stock</option><option value="inventory_movements">Inventory movements</option><option value="inventory_job_costs">Inventory job costs</option></select></label>{!inventoryMode&&<><label>From<input type="date" value={startDate} onChange={e=>setStartDate(e.target.value)}/></label><label>To<input type="date" value={endDate} onChange={e=>setEndDate(e.target.value)}/></label><label>Client<select value={client} onChange={e=>setClient(e.target.value)}><option>All</option>{clients.map(c=><option key={c}>{c}</option>)}</select></label><label>Employee<select value={workerId} onChange={e=>setWorkerId(e.target.value)}><option value="All">All</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label></>}</div>{totals&&<div className="report-summary"><strong>{rows.length} jobs</strong><span>{totals.hours.toFixed(2)} labour hours</span><span>{formatMoney(totals.value)} job value</span><span>{formatMoney(totals.cost)} labour cost</span><span>{formatMoney(totals.materials)} inventory materials</span></div>}<div className="report-actions"><button className="secondary" onClick={()=>window.print()}><Printer size={16}/> Print / PDF</button><button className="primary" onClick={exportExcel}><Download size={16}/> Export Excel</button></div><div className="report-table-wrap"><table className="report-table"><thead><tr>{rows[0]&&Object.keys(rows[0]).map(k=><th key={k}>{k}</th>)}</tr></thead><tbody>{rows.map((r,i)=><tr key={i}>{Object.entries(r).map(([k,v])=><td key={k}>{typeof v==="number"&&(k.toLowerCase().includes("cost")||k.toLowerCase().includes("value"))?formatMoney(v):v}</td>)}</tr>)}</tbody></table>{!rows.length&&<div className="empty">No records match the selected report.</div>}</div></div></div>;
 }
 
 function hasCurrentVisitActivity(job){
@@ -2535,10 +2564,12 @@ function getJobCompletionDate(job){
 }
 function formatMoney(value){ return new Intl.NumberFormat("en-AU",{style:"currency",currency:"AUD"}).format(Number(value)||0); }
 
-function SideNav({ unreadMessages, isAdmin, onCalendar, onShare, onMessages, onPeople, onReports, onTools, onSettings }) {
+function SideNav({ unreadMessages, lowStockCount, isAdmin, hasStoresPermission, onCalendar, onShare, onMessages, onPeople, onReports, onTools, onInventory, onMachinery, onSettings }) {
   return (
     <nav className="side-nav" aria-label="Main actions">
       <button title="Calendar / schedule" onClick={onCalendar}><CalendarDays size={22}/></button>
+      {isAdmin && <button title="Machinery" onClick={onMachinery}><Tractor size={22}/></button>}
+      {hasStoresPermission && <button title="Inventory management" onClick={onInventory} className="side-nav-message"><Forklift size={22}/>{lowStockCount > 0 && <span>{lowStockCount}</span>}</button>}
       {isAdmin && <button title="Share" onClick={onShare}><Share2 size={22}/></button>}
       {isAdmin && <button title="Messages" onClick={onMessages} className="side-nav-message"><Inbox size={22}/>{unreadMessages > 0 && <span>{unreadMessages}</span>}</button>}
       {isAdmin && <button title="People" onClick={onPeople}><Users size={22}/></button>}
@@ -2694,7 +2725,7 @@ function SafetyPermitPicker({ permits, onAdd, onToggle, onRemove }) {
 }
 
 function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
-  const [items, setItems] = useState(workers.map(w => ({ inactive: false, accessRevoked: false, appRole: "employee", sendInvite: false, ...w })));
+  const [items, setItems] = useState(workers.map((w,index) => ({ inactive: false, accessRevoked: false, appRole: "employee", sendInvite: false, storesPermission: false, calendarOrder: index, ...w })));
   const [deletedWorkerIds, setDeletedWorkerIds] = useState([]);
   const [filter, setFilter] = useState("");
   const [peopleTab, setPeopleTab] = useState("active");
@@ -2702,7 +2733,7 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
 
   useEffect(() => {
     if (!items.length && workers.length) {
-      const incoming = workers.map(worker => ({ inactive: false, accessRevoked: false, appRole: "employee", sendInvite: false, ...worker }));
+      const incoming = workers.map((worker,index) => ({ inactive: false, accessRevoked: false, appRole: "employee", sendInvite: false, storesPermission: false, calendarOrder: index, ...worker }));
       setItems(incoming);
       setSelectedId(incoming.find(worker => !worker.inactive)?.id || incoming[0]?.id || "");
     }
@@ -2736,10 +2767,24 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
       accessRevoked: false,
       appRole: "employee",
       sendInvite: false,
-      internalHourlyCost: ""
+      internalHourlyCost: "",
+      storesPermission: false,
+      calendarOrder: items.length
     };
     setItems(current => [worker, ...current]);
     setSelectedId(worker.id);
+  }
+
+  function moveWorker(worker, direction) {
+    if (!worker || worker.inactive) return;
+    const active = items.filter(w=>!w.inactive).sort((a,b)=>(Number(a.calendarOrder)||0)-(Number(b.calendarOrder)||0));
+    const index = active.findIndex(w=>w.id===worker.id);
+    const swapIndex = index + direction;
+    if (index < 0 || swapIndex < 0 || swapIndex >= active.length) return;
+    const other = active[swapIndex];
+    const aOrder = Number(worker.calendarOrder)||index;
+    const bOrder = Number(other.calendarOrder)||swapIndex;
+    setItems(current=>current.map(w=>w.id===worker.id?{...w,calendarOrder:bOrder}:w.id===other.id?{...w,calendarOrder:aOrder}:w));
   }
 
   function deactivate(worker) {
@@ -2829,6 +2874,8 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
                   <option value="admin">Admin — full read/write access</option>
                 </select>
               </label>
+              <label className="check-option plain"><input type="checkbox" checked={selected.appRole==="admin"||Boolean(selected.storesPermission)} disabled={selected.appRole==="admin"} onChange={e=>update(selected.id,"storesPermission",e.target.checked)}/>Stores permission</label>
+              <div className="employee-order-controls"><strong>Calendar order</strong><button type="button" className="secondary" onClick={()=>moveWorker(selected,-1)}><ArrowUp size={15}/> Move up</button><button type="button" className="secondary" onClick={()=>moveWorker(selected,1)}><ArrowDown size={15}/> Move down</button></div>
               <label className="check-option plain"><input type="checkbox" checked={!!selected.sendInvite} onChange={e=>update(selected.id,"sendInvite",e.target.checked)} disabled={!usingSupabase || selected.inactive}/>Send invite email / give app access</label>
               {selected.profileId && <p className="muted">Linked to login profile.</p>}
               {selected.accessRevoked && <p className="muted">Access marked for revocation.</p>}
@@ -2884,7 +2931,7 @@ function MessagesModal({ messages, jobs, onClose, onAction, onReply }) {
   const actionedMessages = visibleMessages.filter(m => m.actioned || m.direction === "out");
   const selectedMessages = tab === "actioned" ? actionedMessages : newMessages;
 
-  return <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Messages</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="message-tabs"><button className={tab === "new" ? "active" : ""} onClick={() => setTab("new")}>New <span>{newMessages.length}</span></button><button className={tab === "actioned" ? "active" : ""} onClick={() => setTab("actioned")}>Actioned / Sent <span>{actionedMessages.length}</span></button></div><div className="message-list">{selectedMessages.map(m=>{const job=jobs.find(j=>j.id===m.jobId); const label=m.direction==="in"?"Received":"Sent"; const party=m.direction==="in"?(m.from||m.phoneNumber||"Client"):(m.to||m.phoneNumber||"Client"); return <article key={m.id} className={m.unread&&!m.actioned?"message-card unread":"message-card"}><div><strong>{label}: {party}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text||"(No message text)"}</p>{job&&<em>Linked job: {job.title}</em>}{m.actioned&&m.actionedAt&&<em>Actioned {m.actionedBy?`by ${m.actionedBy} `:""}on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&m.direction==="in"&&<ReplyAction message={m} onReply={onReply || onAction} />}</article>})}{!selectedMessages.length&&<div className="empty">{tab === "actioned" ? "No actioned or sent messages yet." : "No new SMS/email messages."}</div>}</div></div></div>
+  return <div className="modal-backdrop"><div className="modal"><div className="modal-header"><h2>Messages</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="message-tabs"><button className={tab === "new" ? "active" : ""} onClick={() => setTab("new")}>New <span>{newMessages.length}</span></button><button className={tab === "actioned" ? "active" : ""} onClick={() => setTab("actioned")}>Actioned / Sent <span>{actionedMessages.length}</span></button></div><div className="message-list">{selectedMessages.map(m=>{const job=jobs.find(j=>j.id===m.jobId); const label=m.direction==="in"?"Received":"Sent"; const party=m.direction==="in"?(m.from||m.phoneNumber||"Client"):(m.to||m.phoneNumber||"Client"); return <article key={m.id} className={m.unread&&!m.actioned?"message-card unread":"message-card"}><div><strong>{label}: {party}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text||"(No message text)"}</p>{job&&<em>Linked job: {job.title}</em>}{m.actioned&&m.actionedAt&&<em>Actioned {m.actionedBy?`by ${m.actionedBy} `:""}on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&m.direction==="in"&&<div className="message-card-actions"><ReplyAction message={m} onReply={onReply || onAction} /><button type="button" className="secondary" onClick={()=>onAction?.(m)}>Mark as actioned</button></div>}</article>})}{!selectedMessages.length&&<div className="empty">{tab === "actioned" ? "No actioned or sent messages yet." : "No new SMS/email messages."}</div>}</div></div></div>
 }
 
 function HistoryModal({ job, onClose }) { return <div className="modal-backdrop"><div className="modal mini-modal"><div className="modal-header"><h2>Job history</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><HistoryList items={job.jobHistory||[]} type="history"/></div></div> }
@@ -3128,6 +3175,38 @@ function readDragContext(e) {
   return jobId ? { jobId } : {};
 }
 
+
+function InventoryPage({ items, locations, movements, jobs, isAdmin, currentUser, onClose, onRefresh }) {
+  const [query,setQuery]=useState("");
+  const [lowOnly,setLowOnly]=useState(false);
+  const [editing,setEditing]=useState(null);
+  const [movementItem,setMovementItem]=useState(null);
+  const [importing,setImporting]=useState(false);
+  const balances=useMemo(()=>calculateInventoryBalances(items,movements),[items,movements]);
+  const filtered=items.filter(item=>{const q=query.toLowerCase();const balance=balances[item.id]||0;return (!lowOnly||balance<=Number(item.minimumQuantity||0))&&[item.itemNumber,item.name,item.description,item.category,item.brand,item.supplierName,item.barcode].some(v=>String(v||"").toLowerCase().includes(q));});
+  async function importExcel(file){if(!file)return;setImporting(true);try{const data=await file.arrayBuffer();const wb=XLSX.read(data);const rows=XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:""});const mapped=rows.map((r,i)=>({itemNumber:String(r.item_number||r.ItemNumber||r["Item number"]||"").trim(),name:String(r.item_name||r.Name||r["Item name"]||"").trim(),description:String(r.description||r.Description||""),category:String(r.category||r.Category||""),brand:String(r.brand||r.Brand||""),supplierName:String(r.supplier||r.Supplier||""),supplierItemNumber:String(r.supplier_item_number||r["Supplier item number"]||""),unitOfMeasure:String(r.unit_of_measure||r.Unit||"each"),defaultLocationName:String(r.location||r.Location||""),openingQuantity:Number(r.opening_quantity||r.Quantity||0),unitCost:Number(r.unit_cost||r.Cost||0),minimumQuantity:Number(r.minimum_quantity||r.Minimum||0),reorderQuantity:Number(r.reorder_quantity||r["Reorder quantity"]||0),barcode:String(r.barcode||r.Barcode||""),notes:String(r.notes||r.Notes||"")})).filter(r=>r.itemNumber&&r.name);if(!mapped.length)throw new Error("No valid rows found. Item number and item name are required.");await importInventoryItemsToSupabase(mapped,locations,currentUser?.id);await onRefresh();alert(`${mapped.length} inventory rows imported.`);}catch(err){alert(err.message||"Inventory import failed.");}finally{setImporting(false);}}
+  return <main className="inventory-page"><section className="inventory-shell"><div className="inventory-header"><div><h1><Forklift size={28}/> Inventory Management</h1><p>Stock register, job allocations, reorder levels and QR-ready item records.</p></div><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div><div className="inventory-toolbar"><div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search item, SKU, supplier, category, barcode..."/></div><label className="inline-check"><input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/>Low stock only</label>{isAdmin&&<><button className="primary" onClick={()=>setEditing({})}><Plus size={16}/> Add item</button><label className="secondary file-button"><Upload size={16}/>{importing?"Importing...":"Import Excel"}<input type="file" accept=".xlsx,.xls,.csv" disabled={importing} onChange={e=>importExcel(e.target.files?.[0])}/></label></>}</div><div className="inventory-summary"><article><strong>{items.length}</strong><span>Active items</span></article><article><strong>{items.filter(i=>(balances[i.id]||0)<=Number(i.minimumQuantity||0)).length}</strong><span>At/below minimum</span></article><article><strong>${items.reduce((sum,i)=>sum+(balances[i.id]||0)*Number(i.averageCost||i.unitCost||0),0).toFixed(2)}</strong><span>Stock value</span></article></div><div className="inventory-table-wrap"><table className="inventory-table"><thead><tr><th>Item</th><th>Location</th><th>Available</th><th>Minimum</th><th>Unit cost</th><th>Value</th><th>QR</th><th></th></tr></thead><tbody>{filtered.map(item=>{const qty=balances[item.id]||0;const low=qty<=Number(item.minimumQuantity||0);const location=locations.find(l=>l.id===item.defaultLocationId);return <tr key={item.id} className={low?"low-stock-row":""}><td><button className="inventory-item-link" onClick={()=>setEditing(item)}>{item.itemNumber} · {item.name}</button><small>{item.category||item.brand||"Uncategorised"}</small></td><td>{location?.name||item.defaultLocationName||"Not set"}</td><td>{qty} {item.unitOfMeasure}</td><td>{item.minimumQuantity||0}</td><td>${Number(item.averageCost||item.unitCost||0).toFixed(2)}</td><td>${(qty*Number(item.averageCost||item.unitCost||0)).toFixed(2)}</td><td><span className="qr-provision"><QrCode size={18}/>{item.qrCode||item.itemNumber}</span></td><td><button className="secondary" onClick={()=>setMovementItem(item)}><PackagePlus size={15}/> Stock movement</button></td></tr>})}</tbody></table>{!filtered.length&&<div className="empty">No inventory items match the current filters.</div>}</div></section>{editing&&<InventoryItemModal item={editing} locations={locations} isAdmin={isAdmin} onClose={()=>setEditing(null)} onSaved={async()=>{setEditing(null);await onRefresh();}}/>}{movementItem&&<InventoryMovementModal item={movementItem} locations={locations} jobs={jobs} currentUser={currentUser} onClose={()=>setMovementItem(null)} onSaved={async()=>{setMovementItem(null);await onRefresh();}}/>}</main>;
+}
+
+function InventoryItemModal({item,locations,isAdmin,onClose,onSaved}){const [form,setForm]=useState({id:item.id||"",itemNumber:item.itemNumber||"",name:item.name||"",description:item.description||"",category:item.category||"",brand:item.brand||"",supplierName:item.supplierName||"",supplierItemNumber:item.supplierItemNumber||"",unitOfMeasure:item.unitOfMeasure||"each",defaultLocationId:item.defaultLocationId||"",unitCost:item.unitCost||0,minimumQuantity:item.minimumQuantity||0,reorderQuantity:item.reorderQuantity||0,barcode:item.barcode||"",qrCode:item.qrCode||item.itemNumber||"",notes:item.notes||"",active:item.active!==false});const update=(f,v)=>setForm(c=>({...c,[f]:v}));async function save(e){e.preventDefault();if(!form.itemNumber.trim()||!form.name.trim()){alert("Item number and name are required.");return;}await saveInventoryItemToSupabase(form);await onSaved();}return <div className="modal-backdrop"><form className="modal inventory-item-modal" onSubmit={save}><div className="modal-header"><div><h2>{item.id?"Edit inventory item":"Add inventory item"}</h2><p>QR code value defaults to the item number and can later be printed as a label.</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><div className="two-col"><label>Item number<input value={form.itemNumber} onChange={e=>update("itemNumber",e.target.value)}/></label><label>Item name<input value={form.name} onChange={e=>update("name",e.target.value)}/></label></div><label>Description<textarea rows="2" value={form.description} onChange={e=>update("description",e.target.value)}/></label><div className="two-col"><label>Category<input value={form.category} onChange={e=>update("category",e.target.value)}/></label><label>Brand<input value={form.brand} onChange={e=>update("brand",e.target.value)}/></label></div><div className="two-col"><label>Supplier<input value={form.supplierName} onChange={e=>update("supplierName",e.target.value)}/></label><label>Supplier item number<input value={form.supplierItemNumber} onChange={e=>update("supplierItemNumber",e.target.value)}/></label></div><div className="two-col"><label>Unit<select value={form.unitOfMeasure} onChange={e=>update("unitOfMeasure",e.target.value)}><option>each</option><option>box</option><option>metre</option><option>litre</option><option>roll</option><option>pack</option><option>sheet</option></select></label><label>Default location<select value={form.defaultLocationId} onChange={e=>update("defaultLocationId",e.target.value)}><option value="">Not set</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select></label></div><div className="three-col"><label>Unit cost<input type="number" min="0" step="0.01" value={form.unitCost} onChange={e=>update("unitCost",e.target.value)}/></label><label>Minimum quantity<input type="number" min="0" step="0.01" value={form.minimumQuantity} onChange={e=>update("minimumQuantity",e.target.value)}/></label><label>Reorder quantity<input type="number" min="0" step="0.01" value={form.reorderQuantity} onChange={e=>update("reorderQuantity",e.target.value)}/></label></div><div className="two-col"><label>Barcode<input value={form.barcode} onChange={e=>update("barcode",e.target.value)}/></label><label>QR code value<input value={form.qrCode} onChange={e=>update("qrCode",e.target.value)}/></label></div><label>Notes<textarea rows="2" value={form.notes} onChange={e=>update("notes",e.target.value)}/></label><label className="inline-check"><input type="checkbox" checked={form.active} onChange={e=>update("active",e.target.checked)}/>Active inventory item</label><div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={!isAdmin}>Save item</button></div></form></div>}
+
+function InventoryMovementModal({item,locations,jobs,currentUser,onClose,onSaved}){const [form,setForm]=useState({movementType:"receipt",quantity:1,locationId:item.defaultLocationId||locations[0]?.id||"",jobId:"",unitCost:item.averageCost||item.unitCost||0,reference:"",notes:""});const update=(f,v)=>setForm(c=>({...c,[f]:v}));async function save(e){e.preventDefault();if(!form.locationId||Number(form.quantity)<=0){alert("Select a location and enter a positive quantity.");return;}await saveInventoryMovementToSupabase({...form,itemId:item.id,createdBy:currentUser?.id});await onSaved();}return <div className="modal-backdrop"><form className="modal mini-modal" onSubmit={save}><div className="modal-header"><div><h2>Stock movement</h2><p>{item.itemNumber} · {item.name}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><label>Movement type<select value={form.movementType} onChange={e=>update("movementType",e.target.value)}><option value="receipt">Stock received</option><option value="job_issue">Issue to job</option><option value="job_return">Return from job</option><option value="adjustment_in">Adjustment increase</option><option value="adjustment_out">Adjustment decrease</option><option value="write_off">Damaged / write off</option></select></label><div className="two-col"><label>Quantity<input type="number" min="0.01" step="0.01" value={form.quantity} onChange={e=>update("quantity",e.target.value)}/></label><label>Location<select value={form.locationId} onChange={e=>update("locationId",e.target.value)}>{locations.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select></label></div>{["job_issue","job_return"].includes(form.movementType)&&<label>Job<select value={form.jobId} onChange={e=>update("jobId",e.target.value)}><option value="">Select job</option>{jobs.filter(j=>j.category!=="Cancelled").map(j=><option key={j.id} value={j.id}>{j.jobNumber||j.workOrderNumber||"Job"} · {j.title}</option>)}</select></label>}<label>Unit cost<input type="number" min="0" step="0.01" value={form.unitCost} onChange={e=>update("unitCost",e.target.value)}/></label><label>Reference<input value={form.reference} onChange={e=>update("reference",e.target.value)} placeholder="Delivery docket, invoice or adjustment reference"/></label><label>Notes<textarea rows="2" value={form.notes} onChange={e=>update("notes",e.target.value)}/></label><div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button className="primary">Save movement</button></div></form></div>}
+
+function MachineryPage({machines,bookings,jobs,workers,days,onClose,onAddBooking,onEditBooking,onRefresh,onSaveMachine,onDeleteMachine}){const [selected,setSelected]=useState(null);return <main className="inventory-page"><section className="inventory-shell"><div className="inventory-header"><div><h1><Tractor size={28}/> Machinery</h1><p>All active machines on one calendar.</p></div><div className="machinery-toolbar-actions"><button className="secondary" onClick={onRefresh}><RotateCcw size={15}/> Refresh</button><button className="primary" onClick={()=>onAddBooking({date:getIsoDate(new Date())})}><Plus size={15}/> Booking</button><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div></div><MachineryCalendar machines={machines.filter(m=>m.active!==false&&m.status!=="inactive")} bookings={bookings} jobs={jobs} workers={workers} days={days} onAddBooking={onAddBooking} onEditBooking={onEditBooking} onEditMachine={setSelected}/></section>{selected&&<MachineryDetailModal machine={selected} bookings={bookings.filter(b=>b.machineId===selected.id)} jobs={jobs} workers={workers} onClose={()=>setSelected(null)} onSave={async m=>{await onSaveMachine(m);setSelected(null);}} onDelete={async id=>{if(confirm("Delete this machine and its history?")){await onDeleteMachine(id);setSelected(null);}}}/>}</main>}
+function MachineryDetailModal({machine,bookings,jobs,workers,onClose,onSave,onDelete}){const [tab,setTab]=useState("edit");const [form,setForm]=useState({...machine});const update=(f,v)=>setForm(c=>({...c,[f]:v}));return <div className="modal-backdrop"><div className="modal tool-detail-modal"><div className="modal-header"><div><h2>{machineDisplayName(machine)}</h2><p>{machine.assetNumber||machine.registration||"Machinery record"}</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="tool-detail-tabs"><button className={tab==="edit"?"active":""} onClick={()=>setTab("edit")}>Edit</button><button className={tab==="history"?"active":""} onClick={()=>setTab("history")}>Machinery history <span>{bookings.length}</span></button></div>{tab==="edit"?<div className="tool-detail-body"><div className="two-col"><label>Machine type<input value={form.machineType||""} onChange={e=>update("machineType",e.target.value)}/></label><label>Asset number<input value={form.assetNumber||""} onChange={e=>update("assetNumber",e.target.value)}/></label></div><div className="two-col"><label>Registration<input value={form.registration||""} onChange={e=>update("registration",e.target.value)}/></label><label>Base location<input value={form.baseLocation||""} onChange={e=>update("baseLocation",e.target.value)}/></label></div><label>Status<select value={form.status||"available"} onChange={e=>update("status",e.target.value)}><option value="available">Available</option><option value="out_of_service">Out of service</option><option value="inactive">Inactive</option></select></label><label>Notes<textarea rows="3" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label></div>:<div className="tool-detail-history history-list">{bookings.sort((a,b)=>String(b.startDate).localeCompare(String(a.startDate))).map(b=>{const job=jobs.find(j=>j.id===b.jobId);const worker=workers.find(w=>w.id===b.workerId);return <div key={b.id}><strong>{b.bookingType} · {job?.title||b.description||"Booking"}</strong><span>{b.startDate} to {b.endDate} · {worker?.name||"Unassigned"}</span><p>{b.period==="full_day"?"Full day":String(b.period).toUpperCase()}</p></div>})}{!bookings.length&&<div className="empty">No machinery history yet.</div>}</div>}<div className="modal-actions tool-detail-actions"><button className="danger" onClick={()=>onDelete(machine.id)}><Trash2 size={15}/> Delete machine</button><span className="modal-action-spacer"/><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" onClick={()=>onSave(form)}>Save changes</button></div></div></div>}
+
+function calculateInventoryBalances(items,movements){const out=Object.fromEntries(items.map(i=>[i.id,0]));for(const m of movements){const q=Number(m.quantity)||0;const positive=["receipt","job_return","adjustment_in","transfer_in","opening_balance"].includes(m.movementType);out[m.itemId]=(out[m.itemId]||0)+(positive?q:-q);}return out;}
+function buildInventoryReportRows(type,items,locations,movements,jobs){if(!String(type).startsWith("inventory_"))return [];const balances=calculateInventoryBalances(items,movements);if(type==="inventory_movements")return movements.map(m=>({Date:String(m.createdAt||"").slice(0,10),Item:items.find(i=>i.id===m.itemId)?.name||m.itemId,Type:m.movementType,Quantity:m.quantity,Location:locations.find(l=>l.id===m.locationId)?.name||"",Job:jobs.find(j=>j.id===m.jobId)?.title||"",Cost:Number(m.totalCost||0)}));if(type==="inventory_job_costs")return Object.values(movements.filter(m=>m.movementType==="job_issue"&&m.jobId).reduce((a,m)=>{const j=jobs.find(x=>x.id===m.jobId);a[m.jobId]=a[m.jobId]||{Job:j?.title||m.jobId,JobNumber:j?.jobNumber||"",MaterialCost:0};a[m.jobId].MaterialCost+=Number(m.totalCost||0);return a;},{}));return items.filter(i=>type!=="inventory_low"||(balances[i.id]||0)<=Number(i.minimumQuantity||0)).map(i=>({ItemNumber:i.itemNumber,Item:i.name,Location:locations.find(l=>l.id===i.defaultLocationId)?.name||"",Quantity:balances[i.id]||0,Minimum:i.minimumQuantity||0,Unit:i.unitOfMeasure,UnitCost:Number(i.averageCost||i.unitCost||0),StockValue:(balances[i.id]||0)*Number(i.averageCost||i.unitCost||0)}));}
+
+async function fetchInventoryItemsFromSupabase(){const {data,error}=await supabase.from("inventory_items").select("*").order("item_number");if(error)throw error;return(data||[]).map(r=>({id:r.id,itemNumber:r.item_number||"",name:r.name||"",description:r.description||"",category:r.category||"",brand:r.brand||"",supplierName:r.supplier_name||"",supplierItemNumber:r.supplier_item_number||"",unitOfMeasure:r.unit_of_measure||"each",defaultLocationId:r.default_location_id||"",unitCost:Number(r.unit_cost)||0,averageCost:Number(r.average_cost)||Number(r.unit_cost)||0,minimumQuantity:Number(r.minimum_quantity)||0,reorderQuantity:Number(r.reorder_quantity)||0,barcode:r.barcode||"",qrCode:r.qr_code||r.item_number||"",notes:r.notes||"",active:r.active!==false}));}
+async function fetchInventoryLocationsFromSupabase(){const {data,error}=await supabase.from("inventory_locations").select("*").order("name");if(error)throw error;return(data||[]).map(r=>({id:r.id,name:r.name,code:r.code||"",parentId:r.parent_id||"",active:r.active!==false}));}
+async function fetchInventoryMovementsFromSupabase(){const {data,error}=await supabase.from("inventory_movements").select("*").order("created_at",{ascending:false}).limit(5000);if(error)throw error;return(data||[]).map(r=>({id:r.id,itemId:r.item_id,locationId:r.location_id,jobId:r.job_id||"",movementType:r.movement_type,quantity:Number(r.quantity)||0,unitCost:Number(r.unit_cost)||0,totalCost:Number(r.total_cost)||0,reference:r.reference||"",notes:r.notes||"",createdAt:r.created_at,createdBy:r.created_by||""}));}
+async function saveInventoryItemToSupabase(item){const row={item_number:item.itemNumber.trim(),name:item.name.trim(),description:item.description||null,category:item.category||null,brand:item.brand||null,supplier_name:item.supplierName||null,supplier_item_number:item.supplierItemNumber||null,unit_of_measure:item.unitOfMeasure||"each",default_location_id:isUuid(item.defaultLocationId)?item.defaultLocationId:null,unit_cost:Number(item.unitCost)||0,minimum_quantity:Number(item.minimumQuantity)||0,reorder_quantity:Number(item.reorderQuantity)||0,barcode:item.barcode||null,qr_code:item.qrCode||item.itemNumber,notes:item.notes||null,active:item.active!==false,updated_at:new Date().toISOString()};if(isUuid(item.id))row.id=item.id;const {error}=await supabase.from("inventory_items").upsert(row,{onConflict:"item_number"});if(error)throw error;}
+async function saveInventoryMovementToSupabase(m){const row={item_id:m.itemId,location_id:m.locationId,job_id:isUuid(m.jobId)?m.jobId:null,movement_type:m.movementType,quantity:Number(m.quantity),unit_cost:Number(m.unitCost)||0,total_cost:Number(m.quantity)*(Number(m.unitCost)||0),reference:m.reference||null,notes:m.notes||null,created_by:isUuid(m.createdBy)?m.createdBy:null};const {error}=await supabase.from("inventory_movements").insert(row);if(error)throw error;}
+async function importInventoryItemsToSupabase(rows,locations,userId){for(const r of rows){let location=locations.find(l=>l.name.toLowerCase()===r.defaultLocationName.toLowerCase());if(!location&&r.defaultLocationName){const {data,error}=await supabase.from("inventory_locations").insert({name:r.defaultLocationName,code:r.defaultLocationName.toUpperCase().replace(/[^A-Z0-9]+/g,"-").slice(0,30)}).select("*").single();if(error)throw error;location={id:data.id,name:data.name};locations.push(location);}const itemRow={item_number:r.itemNumber,name:r.name,description:r.description||null,category:r.category||null,brand:r.brand||null,supplier_name:r.supplierName||null,supplier_item_number:r.supplierItemNumber||null,unit_of_measure:r.unitOfMeasure||"each",default_location_id:location?.id||null,unit_cost:r.unitCost,average_cost:r.unitCost,minimum_quantity:r.minimumQuantity,reorder_quantity:r.reorderQuantity,barcode:r.barcode||null,qr_code:r.barcode||r.itemNumber,notes:r.notes||null};const {data,error}=await supabase.from("inventory_items").upsert(itemRow,{onConflict:"item_number"}).select("id").single();if(error)throw error;if(r.openingQuantity>0){const {count}=await supabase.from("inventory_movements").select("id",{count:"exact",head:true}).eq("item_id",data.id);if(!count)await saveInventoryMovementToSupabase({itemId:data.id,locationId:location?.id,movementType:"opening_balance",quantity:r.openingQuantity,unitCost:r.unitCost,reference:"Excel opening balance",createdBy:userId});}}}
+async function saveSingleMachineryToSupabase(machine){await saveMachineryToSupabase([machine]);}
+async function deleteMachineryFromSupabase(id){const {error}=await supabase.from("machinery").delete().eq("id",id);if(error)throw error;}
+
 function mapWorkerFromSupabase(row) {
   return {
     id: row.id,
@@ -3152,7 +3231,9 @@ function mapWorkerFromSupabase(row) {
     inviteStatus: row.invite_status || "",
     inviteRequested: Boolean(row.invite_requested),
     invitedAt: row.invited_at || "",
-    internalHourlyCost: ""
+    internalHourlyCost: "",
+    storesPermission: Boolean(row.stores_permission),
+    calendarOrder: Number(row.calendar_order) || 0
   };
 }
 
@@ -3176,6 +3257,8 @@ function mapWorkerToSupabase(worker) {
     access_revoked: Boolean(worker.accessRevoked),
     app_role: worker.appRole || "employee",
     invite_requested: Boolean(worker.sendInvite),
+    stores_permission: Boolean(worker.storesPermission),
+    calendar_order: Number(worker.calendarOrder) || 0,
     updated_at: new Date().toISOString()
   };
 
@@ -3233,6 +3316,7 @@ async function fetchWorkersFromSupabase() {
   const { data, error } = await supabase
     .from("workers")
     .select("*")
+    .order("calendar_order", { ascending: true })
     .order("name", { ascending: true });
 
   if (error) throw error;
