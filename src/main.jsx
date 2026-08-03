@@ -2250,6 +2250,7 @@ function JobModal({ job, teamMembers, currentUser, actorName = CURRENT_USER, isA
   const [noteInput, setNoteInput] = useState("");
   const [showNoteInTradeView, setShowNoteInTradeView] = useState(false);
   const [materialInput, setMaterialInput] = useState("");
+  const [jobInventoryOpen, setJobInventoryOpen] = useState(false);
   const [messageText, setMessageText] = useState(job._messageMode === "reschedule" ? buildRescheduleMessage(normaliseJob(job)) : buildScheduleMessage(normaliseJob(job)));
   const [attachmentUploading, setAttachmentUploading] = useState(false);
   const [smsSending, setSmsSending] = useState(false);
