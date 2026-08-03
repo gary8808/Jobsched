@@ -1,8 +1,12 @@
-const CACHE_NAME = "aim-cg-v43e-review";
+const CACHE_NAME = "aim-cg-v43f-blank-page-recovery";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./aim-logo.png", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", event => {
-  event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.addAll(APP_SHELL)).then(() => self.skipWaiting()));
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then(cache => cache.addAll(APP_SHELL))
+      .then(() => self.skipWaiting())
+  );
 });
 
 self.addEventListener("activate", event => {
@@ -16,29 +20,26 @@ self.addEventListener("activate", event => {
 self.addEventListener("fetch", event => {
   const request = event.request;
   if (request.method !== "GET") return;
+
   const url = new URL(request.url);
-  if (url.hostname.includes("supabase.co") || url.hostname.includes("clicksend.com")) return;
+  if (url.origin !== self.location.origin) return;
 
-  if (request.mode === "navigate") {
-    event.respondWith(
-      fetch(request)
-        .then(response => {
-          const copy = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put("./", copy));
-          return response;
-        })
-        .catch(() => caches.match("./"))
-    );
-    return;
-  }
-
+  // Network-first prevents a previous deployment's HTML/JS from being mixed
+  // with the current deployment. Cached files remain available offline.
   event.respondWith(
-    caches.match(request).then(cached => cached || fetch(request).then(response => {
-      if (response.ok && url.origin === self.location.origin) {
-        const copy = response.clone();
-        caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
-      }
-      return response;
-    }))
+    fetch(request)
+      .then(response => {
+        if (response.ok) {
+          const copy = response.clone();
+          caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
+        }
+        return response;
+      })
+      .catch(async () => {
+        const cached = await caches.match(request);
+        if (cached) return cached;
+        if (request.mode === "navigate") return caches.match("./");
+        throw new Error("Offline and no cached response is available.");
+      })
   );
 });

@@ -16,6 +16,21 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      window.__aimBootError = null;
+      window.addEventListener("error", event => {
+        window.__aimBootError = event.error?.message || event.message || "Unknown startup error";
+      });
+      window.addEventListener("unhandledrejection", event => {
+        window.__aimBootError = event.reason?.message || String(event.reason || "Unknown startup rejection");
+      });
+      window.setTimeout(() => {
+        const root = document.getElementById("root");
+        if (root && !root.hasChildNodes()) {
+          root.innerHTML = `<main style="min-height:100vh;display:grid;place-items:center;padding:24px;font-family:system-ui;background:#f4f6f8"><section style="max-width:620px;background:white;border:1px solid #d8dee8;border-radius:18px;padding:22px"><h1 style="margin-top:0">AIM CG did not start</h1><p>${window.__aimBootError || "The browser did not load the application JavaScript."}</p><p>Refresh the page once. If it remains here, open the browser console and copy the first red error.</p><button onclick="location.reload()" style="border:0;border-radius:10px;padding:10px 14px;font-weight:700;background:#18202a;color:white">Reload app</button></section></main>`;
+        }
+      }, 5000);
+    </script>
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

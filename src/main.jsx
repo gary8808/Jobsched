@@ -4712,7 +4712,38 @@ function getReadiness(job) {
   };
 }
 
-createRoot(document.getElementById("root")).render(<App />);
+class AppErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error, info) {
+    console.error("AIM CG application render failed", error, info);
+  }
+
+  render() {
+    if (!this.state.error) return this.props.children;
+    return (
+      <main className="auth-page">
+        <section className="auth-card">
+          <strong>AIM CG could not start</strong>
+          <p className="auth-error">{this.state.error?.message || "An unexpected browser error occurred."}</p>
+          <p className="muted">Refresh once. If this screen returns, copy the error above before changing any data.</p>
+          <button className="primary" type="button" onClick={() => window.location.reload()}>Reload app</button>
+        </section>
+      </main>
+    );
+  }
+}
+
+const rootElement = document.getElementById("root");
+if (!rootElement) throw new Error("The application root element is missing from index.html.");
+createRoot(rootElement).render(<AppErrorBoundary><App /></AppErrorBoundary>);
 
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
