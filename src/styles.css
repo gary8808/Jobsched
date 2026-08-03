@@ -1793,3 +1793,7 @@ label textarea {
   .tool-detail-actions .modal-action-spacer { display: none; }
   .tool-detail-actions button { flex: 1 1 45%; }
 }
+
+/* v43e consolidated sync controls */
+.machinery-toolbar .machinery-toolbar-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
+@media(max-width:800px){.machinery-toolbar{flex-wrap:wrap}.machinery-toolbar .machinery-toolbar-actions{width:100%;justify-content:flex-start;flex-wrap:wrap}}

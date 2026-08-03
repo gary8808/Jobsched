@@ -1,0 +1,15 @@
+Recommended: replace the full repository contents with this build.
+
+Minimum changed repository files:
+- src/main.jsx
+- src/styles.css
+- package.json
+- public/sw.js
+- .github/workflows/deploy.yml
+
+Run separately in Supabase SQL Editor (do not need to upload to GitHub):
+- SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql
+
+Review/testing documents:
+- BUILD_NOTES_v43e_CONSOLIDATED_REVIEW.md
+- TEST_MATRIX_v43e.md

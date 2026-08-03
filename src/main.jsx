@@ -1,6 +1,6 @@
 
-// AIM CG v43d - mobile tool register, tool details and reliable initial sync
-import React, { useEffect, useMemo, useState } from "react";
+// AIM CG v43e - consolidated Supabase sync, atomic bookings and data-load hardening
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Plus, Search, Trash2, Pencil, X, Users, ChevronLeft, ChevronRight,
@@ -16,8 +16,9 @@ import { supabase, supabaseConfig } from "./supabaseClient";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-const STORAGE_KEY = "aim-cg-v43d-tools";
-const CURRENT_USER = "Demo User";
+const STORAGE_KEY = "aim-cg-v43e-supabase";
+const LEGACY_STORAGE_KEYS = ["aim-cg-v43d-tools"];
+const CURRENT_USER = "AIM CG User";
 
 const CATEGORIES = [
   "To be scheduled",
@@ -70,41 +71,21 @@ const STATUS_META = {
 };
 
 const initialData = {
-  teamMembers: [
-    { id: "gary", name: "Gary", trade: "Supervisor", baseSite: "Paraburdoo", phone: "0400 000 000", email: "gary@example.com", birthday: "", sapNumber: "SAP001", rosterPattern: "5_ON_2_OFF", rosterStartDate: getIsoDate(new Date()), inactive: false },
-    { id: "mick", name: "Mick", trade: "Carpenter", baseSite: "Busselton", phone: "", email: "", birthday: "", sapNumber: "SAP002", rosterPattern: "8_ON_6_OFF", rosterStartDate: getIsoDate(new Date()), inactive: false },
-    { id: "drew", name: "Drew", trade: "Plumber", baseSite: "Paraburdoo", phone: "", email: "", birthday: "", sapNumber: "SAP003", rosterPattern: "14_ON_7_OFF", rosterStartDate: getIsoDate(new Date()), inactive: false },
-    { id: "gaz", name: "Gaz", trade: "Electrician", baseSite: "Brockman", phone: "", email: "", birthday: "", sapNumber: "SAP004", rosterPattern: "14_ON_14_OFF", rosterStartDate: getIsoDate(new Date()), inactive: false }
-  ],
-  jobs: [
-    normaliseJob({
-      id: createId(),
-      title: "790 larnook pool fence panel replacement WO5879466",
-      client: "Sodexo Remote Sites Australia Pty Ltd.",
-      site: "Paraburdoo",
-      requiredTrade: "Carpenter",
-      materialsStatus: "Parts from stock",
-      jobNumber: "JB04953",
-      quoteNumber: "QUO 10574",
-      workOrderNumber: "WO 5879466",
-      poNumber: "PO D087307",
-      address: "247 Balcatta Road, Balcatta, Western Australia 6021, Australia",
-      clientContact: "Sodexo Remote Sites",
-      clientPhone: "0400 000 000",
-      category: "To be scheduled",
-      assignedTo: [],
-      notes: "Mobilise to site with personnel, materials and equipment\nCarry out paperwork\nInstall barricading and signage\nReplace pool fence panels\nTidy site and demobilise",
-      materials: [{ id: createId(), text: "Pool fencing clips", status: "Required" }],
-      noteHistory: [{ id: createId(), date: new Date().toISOString(), user: CURRENT_USER, text: "Job imported after PO received." }],
-      jobHistory: [{ id: createId(), date: new Date().toISOString(), user: CURRENT_USER, action: "Created", details: "Demo job created." }]
-    })
-  ],
+  teamMembers: [],
+  jobs: [],
   leaveRecords: [],
   messages: []
 };
 
+const jobPersistQueues = new Map();
+
 function App() {
   const [data, setData] = useState(loadData);
+  const dataRef = useRef(data);
+  const workerRefreshSequence = useRef(0);
+  const machineryRefreshSequence = useRef(0);
+  const toolRefreshSequence = useRef(0);
+  dataRef.current = data;
   const [view, setView] = useState("admin");
   const [adminTab, setAdminTab] = useState("schedule");
   const [dashboardTab, setDashboardTab] = useState("Action needed");
@@ -116,6 +97,7 @@ function App() {
   const [siteFilter, setSiteFilter] = useState("All");
   const [hideUnavailable, setHideUnavailable] = useState(false);
   const [weekStart, setWeekStart] = useState(getStartOfWeek(new Date()));
+  const [todayKey, setTodayKey] = useState(() => getIsoDate(new Date()));
   const [calendarDayCount, setCalendarDayCount] = useState(7);
   const [editingJob, setEditingJob] = useState(null);
   const [jobHistoryJob, setJobHistoryJob] = useState(null);
@@ -132,6 +114,7 @@ function App() {
   const [machineryBookingOpen, setMachineryBookingOpen] = useState(null);
   const [tools, setTools] = useState([]);
   const [toolHistory, setToolHistory] = useState([]);
+  const [toolWorkerDirectory, setToolWorkerDirectory] = useState([]);
   const [toolsOpen, setToolsOpen] = useState(false);
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [bucketsCollapsed, setBucketsCollapsed] = useState(false);
@@ -154,10 +137,66 @@ function App() {
   const [backendWorkers, setBackendWorkers] = useState([]);
   const [workersLoading, setWorkersLoading] = useState(false);
   const [jobsLoading, setJobsLoading] = useState(false);
-  const [jobsSyncMessage, setJobsSyncMessage] = useState("Local demo jobs active until Supabase jobs are loaded.");
+  const [jobsSyncMessage, setJobsSyncMessage] = useState("Waiting for Supabase job data.");
   const [passwordSetupMode, setPasswordSetupMode] = useState(() => getAuthReturnType());
   const [installPrompt, setInstallPrompt] = useState(null);
   const [isInstalledPwa, setIsInstalledPwa] = useState(() => window.matchMedia?.("(display-mode: standalone)")?.matches || window.navigator.standalone === true);
+
+  async function refreshMachineryData() {
+    const sequence = ++machineryRefreshSequence.current;
+    const [machineResult, bookingResult] = await Promise.allSettled([
+      fetchMachineryFromSupabase(),
+      fetchMachineryBookingsFromSupabase()
+    ]);
+    if (sequence !== machineryRefreshSequence.current) return false;
+
+    if (machineResult.status === "fulfilled") {
+      const machines = machineResult.value;
+      setMachinery(machines);
+      setSelectedMachineId(current =>
+        current && machines.some(machine => machine.id === current)
+          ? current
+          : (machines.find(machine => machine.active !== false && machine.status !== "inactive")?.id || "")
+      );
+    } else {
+      console.error("Could not refresh machinery register", machineResult.reason);
+    }
+
+    if (bookingResult.status === "fulfilled") {
+      setMachineryBookings(bookingResult.value);
+    } else {
+      console.error("Could not refresh machinery bookings", bookingResult.reason);
+    }
+
+    if (machineResult.status === "rejected" && bookingResult.status === "rejected") {
+      throw machineResult.reason || bookingResult.reason || new Error("Could not refresh machinery.");
+    }
+    return true;
+  }
+
+  async function refreshToolData() {
+    const sequence = ++toolRefreshSequence.current;
+    const [toolResult, historyResult, directoryResult] = await Promise.allSettled([
+      fetchToolsFromSupabase(),
+      fetchToolHistoryFromSupabase(),
+      fetchWorkerNameDirectoryFromSupabase()
+    ]);
+    if (sequence !== toolRefreshSequence.current) return false;
+
+    if (toolResult.status === "fulfilled") setTools(toolResult.value);
+    else console.error("Could not refresh tool register", toolResult.reason);
+
+    if (historyResult.status === "fulfilled") setToolHistory(historyResult.value);
+    else console.error("Could not refresh tool history", historyResult.reason);
+
+    if (directoryResult.status === "fulfilled") setToolWorkerDirectory(directoryResult.value);
+    else console.warn("Could not refresh the tool holder name directory", directoryResult.reason);
+
+    if (toolResult.status === "rejected" && historyResult.status === "rejected") {
+      throw toolResult.reason || historyResult.reason || new Error("Could not refresh tools.");
+    }
+    return true;
+  }
 
   useEffect(() => {
     function handleBeforeInstallPrompt(event) {
@@ -186,6 +225,21 @@ function App() {
     }
     alert("On iPhone/iPad, tap Share then Add to Home Screen. On Android/desktop, open the browser menu and choose Install app or Add to Home screen.");
   }
+
+  useEffect(() => {
+    const refreshToday = () => {
+      const next = getIsoDate(new Date());
+      setTodayKey(current => current === next ? current : next);
+    };
+    const timer = window.setInterval(refreshToday, 60000);
+    window.addEventListener("focus", refreshToday);
+    document.addEventListener("visibilitychange", refreshToday);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", refreshToday);
+      document.removeEventListener("visibilitychange", refreshToday);
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;
@@ -228,125 +282,97 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!session || !supabase) return;
-    // Remove any legacy seeded/local employee list immediately. Supabase will
-    // repopulate it with the authoritative worker rows.
-    setData(current => ({ ...current, teamMembers: [] }));
-  }, [session?.user?.id]);
+    if (!supabase || authLoading) return;
+
+    // Invalidate any in-flight register requests when the authenticated user
+    // changes. This prevents a slower response from the previous session from
+    // repopulating the next user's screen.
+    workerRefreshSequence.current += 1;
+    machineryRefreshSequence.current += 1;
+    toolRefreshSequence.current += 1;
+
+    // Supabase-backed records must never be restored from another login's local
+    // browser cache. Leave remains local-only for now and is intentionally kept.
+    updateData(current => ({
+      ...current,
+      teamMembers: [],
+      jobs: [],
+      messages: []
+    }));
+    setBackendWorkers([]);
+    setMachinery([]);
+    setMachineryBookings([]);
+    setTools([]);
+    setToolHistory([]);
+    setToolWorkerDirectory([]);
+    setEmployeeId("");
+  }, [session?.user?.id, authLoading]);
 
   useEffect(() => {
-    let alive = true;
-
-    async function checkSupabase() {
-      if (!supabase) {
-        if (!alive) return;
-        setSupabaseCheck({
-          status: "error",
-          workers: [],
-          message: supabaseConfig.hasUrl || supabaseConfig.hasKey
-            ? "Supabase setup is incomplete. Check both VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY."
-            : "Supabase variables are missing from the build. Check GitHub Actions variables and deploy.yml."
-        });
-        return;
-      }
-
-      if (!session) {
-        if (!alive) return;
-        setBackendWorkers([]);
-        setSupabaseCheck({
-          status: authLoading ? "checking" : "error",
-          workers: [],
-          message: authLoading
-            ? "Checking Supabase session..."
-            : "Not signed in. Sign in to run the authenticated workers test."
-        });
-        return;
-      }
-
-      setWorkersLoading(true);
-      try {
-        const workers = await fetchWorkersFromSupabase();
-        if (!alive) return;
-
-        // Workers are loaded independently from jobs/messages/tools. A failure in
-        // another feature must never leave the old demo employee list on screen.
-        setBackendWorkers(workers);
-        setData(current => ({ ...current, teamMembers: workers }));
-        let remoteJobs = [];
-        let remoteMessages = [];
-        let remoteMachinery = [];
-        let remoteMachineryBookings = [];
-        let remoteTools = [];
-        let remoteToolHistory = [];
-        try {
-          setJobsLoading(true);
-          remoteJobs = await fetchJobsFromSupabase();
-          remoteMessages = await fetchMessagesFromSupabase();
-          if (currentProfile?.role === "admin") {
-            [remoteMachinery, remoteMachineryBookings] = await Promise.all([fetchMachineryFromSupabase(), fetchMachineryBookingsFromSupabase()]);
-          } else {
-            [remoteMachinery, remoteMachineryBookings] = await Promise.all([fetchMachineryFromSupabase(), fetchMachineryBookingsFromSupabase()]);
-          }
-        } finally {
-          setJobsLoading(false);
-        }
-
-        try { [remoteTools, remoteToolHistory] = await Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()]); } catch (toolError) { console.warn("Tool register not available yet", toolError); }
-        setMachinery(remoteMachinery);
-        setMachineryBookings(remoteMachineryBookings);
-        setTools(remoteTools);
-        setToolHistory(remoteToolHistory);
-        if (!selectedMachineId && remoteMachinery.length) setSelectedMachineId(remoteMachinery[0].id);
-        // Once authenticated, Supabase is always the source of truth, including
-        // when a table is intentionally empty. Never retain seeded/local workers.
-        setData(current => ({
-          ...current,
-          teamMembers: workers,
-          jobs: remoteJobs,
-          messages: remoteMessages
-        }));
-        setJobsSyncMessage(remoteJobs.length ? `Loaded ${remoteJobs.length} job(s) and ${remoteMessages.length} message(s) from Supabase.` : "No Supabase jobs found yet. New/edited jobs will save to Supabase.");
-
-        setSupabaseCheck({
-          status: "connected",
-          workers,
-          message: `Authenticated as ${session.user?.email || "user"}. Workers found: ${workers.length}. Jobs found: ${remoteJobs.length}. Messages found: ${remoteMessages.length}`
-        });
-      } catch (error) {
-        if (!alive) return;
-        setSupabaseCheck({
-          status: "error",
-          workers: [],
-          message: error?.message || "Unknown Supabase connection error"
-        });
-      } finally {
-        if (alive) setWorkersLoading(false);
-      }
+    if (!supabase) {
+      setSupabaseCheck({
+        status: "error",
+        workers: [],
+        message: supabaseConfig.hasUrl || supabaseConfig.hasKey
+          ? "Supabase setup is incomplete. Check both VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY."
+          : "Supabase variables are missing from the build. Check GitHub Actions variables and deploy.yml."
+      });
+      return;
     }
-
-    checkSupabase();
-    return () => { alive = false; };
-  }, [session, authLoading]);
+    if (!session) {
+      setSupabaseCheck({
+        status: authLoading ? "checking" : "error",
+        workers: [],
+        message: authLoading ? "Checking Supabase session..." : "Not signed in."
+      });
+      return;
+    }
+    setSupabaseCheck({
+      status: "connected",
+      workers: data.teamMembers,
+      message: `Authenticated as ${session.user?.email || "user"}.`
+    });
+  }, [session?.user?.id, authLoading, data.teamMembers]);
 
   useEffect(() => {
     if (!supabase || !session) return;
 
     let alive = true;
     let refreshTimer = null;
+    let refreshInterval = null;
 
     async function refreshWorkers() {
+      const sequence = ++workerRefreshSequence.current;
+      setWorkersLoading(true);
       try {
         const freshWorkersBase = await fetchWorkersFromSupabase();
-        const costMap = currentProfile?.role === "admin" ? await fetchEmployeeCostsFromSupabase().catch(() => ({})) : {};
-        if (!alive) return;
+        const costMap = currentProfile?.role === "admin"
+          ? await fetchEmployeeCostsFromSupabase().catch(() => ({}))
+          : {};
+        if (!alive || sequence !== workerRefreshSequence.current) return;
         const freshWorkers = freshWorkersBase.map(worker => ({
           ...worker,
           internalHourlyCost: costMap[worker.id] ?? worker.internalHourlyCost ?? ""
         }));
         setBackendWorkers(freshWorkers);
-        setData(current => ({ ...current, teamMembers: freshWorkers }));
+        updateData(current => ({ ...current, teamMembers: freshWorkers }));
+        setSupabaseCheck(current => ({
+          ...current,
+          status: "connected",
+          workers: freshWorkers,
+          message: `Authenticated as ${session.user?.email || "user"}. Workers found: ${freshWorkers.length}.`
+        }));
       } catch (error) {
         console.error("Could not refresh workers", error);
+        if (alive) {
+          setSupabaseCheck(current => ({
+            ...current,
+            status: "error",
+            message: error?.message || "Could not load employees from Supabase."
+          }));
+        }
+      } finally {
+        if (alive && sequence === workerRefreshSequence.current) setWorkersLoading(false);
       }
     }
 
@@ -355,32 +381,49 @@ function App() {
       refreshTimer = setTimeout(refreshWorkers, 250);
     }
 
+    refreshWorkers();
+
     const channel = supabase
       .channel(`workers-sync-${session.user?.id || "user"}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "workers" }, queueWorkerRefresh)
       .subscribe();
 
     const handleFocus = () => refreshWorkers();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") refreshWorkers();
+    };
     window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshWorkers();
+    }, 60000);
 
     return () => {
       alive = false;
       clearTimeout(refreshTimer);
+      clearInterval(refreshInterval);
       window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
       supabase.removeChannel(channel);
     };
   }, [session?.user?.id, currentProfile?.role]);
 
   useEffect(() => {
     if (!supabase || !session) return;
+    const adminAccess = currentProfile?.role === "admin" && currentProfile?.active !== false;
+    if (!adminAccess) {
+      updateData(current => current.messages?.length ? ({ ...current, messages: [] }) : current);
+      return;
+    }
 
     let alive = true;
+    let refreshInterval = null;
 
     async function refreshMessages() {
       try {
         const freshMessages = await fetchMessagesFromSupabase();
         if (!alive) return;
-        setData(current => ({
+        updateData(current => ({
           ...current,
           messages: freshMessages
         }));
@@ -392,111 +435,211 @@ function App() {
     refreshMessages();
 
     const channel = supabase
-      .channel("jobsched-messages")
-      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, () => {
-        refreshMessages();
-      })
+      .channel(`aimcg-messages-${session.user?.id || "user"}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "messages" }, refreshMessages)
       .subscribe();
+
+    const handleFocus = () => refreshMessages();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") refreshMessages();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshMessages();
+    }, 60000);
 
     return () => {
       alive = false;
-      supabase.removeChannel(channel);
+      clearInterval(refreshInterval);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      supabase.removeChannel(coreChannel);
+      supabase.removeChannel(enrichmentChannel);
     };
-  }, [session?.user?.id]);
+  }, [session?.user?.id, currentProfile?.role, currentProfile?.active]);
 
   useEffect(() => {
     if (!supabase || !session) return;
 
     let alive = true;
     let refreshTimer = null;
+    let refreshInterval = null;
     let refreshSequence = 0;
+    const adminAccess = currentProfile?.role === "admin" && currentProfile?.active !== false;
 
-    function refreshJobsAndBookings() {
-      // Saving a schedule replaces booking rows (delete then insert). Debounce
-      // the realtime events so the temporary no-bookings state cannot overwrite
-      // the calendar after a successful reschedule.
-      if (refreshTimer) clearTimeout(refreshTimer);
+    async function refreshJobsNow() {
       const sequence = ++refreshSequence;
-      refreshTimer = setTimeout(async () => {
-        try {
-          const freshJobs = await fetchJobsFromSupabase();
-          if (!alive || sequence !== refreshSequence) return;
-          setData(current => ({ ...current, jobs: freshJobs }));
-        } catch (err) {
-          console.error("Could not refresh jobs/bookings", err);
+      setJobsLoading(true);
+      try {
+        // A realtime event can arrive while this browser is still saving a job.
+        // Wait for those queued writes so the refresh cannot replace the local
+        // calendar with an older/intermediate server snapshot.
+        const pendingWrites = [...jobPersistQueues.values()];
+        if (pendingWrites.length) await Promise.allSettled(pendingWrites);
+        let freshJobs = await fetchJobsFromSupabase();
+        if (adminAccess) {
+          const financials = await fetchJobFinancialsFromSupabase().catch(error => {
+            console.warn("Could not load admin job values", error);
+            return {};
+          });
+          freshJobs = freshJobs.map(job => ({
+            ...job,
+            jobValue: financials[job.id] ?? job.jobValue ?? ""
+          }));
         }
-      }, 350);
+        if (!alive || sequence !== refreshSequence) return;
+        updateData(current => ({ ...current, jobs: freshJobs }));
+        setJobsSyncMessage(
+          freshJobs.length
+            ? `Loaded ${freshJobs.length} job(s) from Supabase.`
+            : "No jobs are currently visible for this login."
+        );
+      } catch (err) {
+        console.error("Could not refresh jobs/bookings", err);
+        if (alive) {
+          setJobsSyncMessage(err?.message ? `Supabase job load failed: ${err.message}` : "Supabase job load failed.");
+        }
+      } finally {
+        if (alive && sequence === refreshSequence) setJobsLoading(false);
+      }
     }
 
-    const channel = supabase
-      .channel(`jobsched-jobs-bookings-${session.user.id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "jobs" }, refreshJobsAndBookings)
-      .on("postgres_changes", { event: "*", schema: "public", table: "job_bookings" }, refreshJobsAndBookings)
+    function queueJobsRefresh(delay = 300) {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refreshJobsNow, delay);
+    }
+
+    // Jobs and bookings must load independently of admin-only messages,
+    // machinery and tools. This is the authoritative initial Trade View load.
+    refreshJobsNow();
+
+    // Keep the core scheduling subscription separate from optional/admin-only
+    // tables. A missing migration or restrictive policy on an enrichment table
+    // must never stop job and booking changes reaching Trade View.
+    const coreChannel = supabase
+      .channel(`aimcg-jobs-core-${session.user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "jobs" }, () => queueJobsRefresh())
+      .on("postgres_changes", { event: "*", schema: "public", table: "job_bookings" }, () => queueJobsRefresh())
       .subscribe();
+
+    let enrichmentChannel = supabase
+      .channel(`aimcg-jobs-enrichment-${session.user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "job_notes" }, () => queueJobsRefresh())
+      .on("postgres_changes", { event: "*", schema: "public", table: "attachments" }, () => queueJobsRefresh())
+      .on("postgres_changes", { event: "*", schema: "public", table: "job_completion_submissions" }, () => queueJobsRefresh())
+      .on("postgres_changes", { event: "*", schema: "public", table: "job_visit_history" }, () => queueJobsRefresh());
+    if (adminAccess) {
+      enrichmentChannel = enrichmentChannel
+        .on("postgres_changes", { event: "*", schema: "public", table: "job_history" }, () => queueJobsRefresh())
+        .on("postgres_changes", { event: "*", schema: "public", table: "job_financials" }, () => queueJobsRefresh());
+    }
+    enrichmentChannel.subscribe();
+
+    const handleFocus = () => refreshJobsNow();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") refreshJobsNow();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshJobsNow();
+    }, 30000);
 
     return () => {
       alive = false;
+      clearTimeout(refreshTimer);
+      clearInterval(refreshInterval);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      supabase.removeChannel(channel);
+    };
+  }, [session?.user?.id, currentProfile?.role, currentProfile?.active]);
+
+
+
+  useEffect(() => {
+    if (!supabase || !session) return;
+    let refreshInterval = null;
+
+    const refreshMachinery = () => refreshMachineryData().catch(error => {
+      console.error("Could not refresh machinery", error);
+    });
+
+    // Realtime only delivers future changes. Load existing machinery immediately.
+    refreshMachinery();
+
+    const channel = supabase.channel(`aimcg-machinery-${session.user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "machinery" }, refreshMachinery)
+      .on("postgres_changes", { event: "*", schema: "public", table: "machinery_bookings" }, refreshMachinery)
+      .subscribe();
+
+    const handleFocus = () => refreshMachinery();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") refreshMachinery();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshMachinery();
+    }, 45000);
+
+    return () => {
+      clearInterval(refreshInterval);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
       supabase.removeChannel(channel);
     };
   }, [session?.user?.id]);
 
 
+
   useEffect(() => {
     if (!supabase || !session) return;
-    let alive = true;
-    async function refreshMachinery() {
-      try {
-        const [machines, bookings] = await Promise.all([fetchMachineryFromSupabase(), fetchMachineryBookingsFromSupabase()]);
-        if (!alive) return;
-        setMachinery(machines);
-        setMachineryBookings(bookings);
-      } catch (err) {
-        console.error("Could not refresh machinery", err);
-      }
-    }
-    const channel = supabase.channel(`aimcg-machinery-${session.user.id}`)
-      .on("postgres_changes", { event: "*", schema: "public", table: "machinery" }, refreshMachinery)
-      .on("postgres_changes", { event: "*", schema: "public", table: "machinery_bookings" }, refreshMachinery)
-      .subscribe();
-    return () => { alive = false; supabase.removeChannel(channel); };
-  }, [session?.user?.id]);
+    const machinerySurfaceOpen = adminTab === "machinery" || machinerySettingsOpen || Boolean(editingJob);
+    if (!machinerySurfaceOpen) return;
+    refreshMachineryData().catch(error => console.error("Could not open current machinery data", error));
+  }, [adminTab, machinerySettingsOpen, editingJob?.id, session?.user?.id]);
 
 
   useEffect(() => {
     if (!supabase || !session) return;
-    let alive = true;
-    async function refreshTools() {
-      try {
-        const [freshTools, freshHistory] = await Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()]);
-        if (!alive) return;
-        setTools(freshTools);
-        setToolHistory(freshHistory);
-      } catch (err) { console.error("Could not refresh tool register", err); }
-    }
-    // Load immediately as well as subscribing. Realtime only reports future
-    // changes, so without this call an existing register can appear empty until
-    // somebody adds or edits a tool.
+    let refreshInterval = null;
+
+    const refreshTools = () => refreshToolData().catch(error => {
+      console.error("Could not refresh tool register", error);
+    });
+
     refreshTools();
+
     const channel = supabase.channel(`aimcg-tools-${session.user.id}`)
       .on("postgres_changes", { event: "*", schema: "public", table: "tools" }, refreshTools)
       .on("postgres_changes", { event: "*", schema: "public", table: "tool_transactions" }, refreshTools)
       .subscribe();
-    return () => { alive = false; supabase.removeChannel(channel); };
+
+    const handleFocus = () => refreshTools();
+    const handleVisibility = () => {
+      if (document.visibilityState === "visible") refreshTools();
+    };
+    window.addEventListener("focus", handleFocus);
+    document.addEventListener("visibilitychange", handleVisibility);
+    refreshInterval = window.setInterval(() => {
+      if (document.visibilityState === "visible") refreshTools();
+    }, 60000);
+
+    return () => {
+      clearInterval(refreshInterval);
+      window.removeEventListener("focus", handleFocus);
+      document.removeEventListener("visibilitychange", handleVisibility);
+      supabase.removeChannel(channel);
+    };
   }, [session?.user?.id]);
 
 
 
   useEffect(() => {
     if (!toolsOpen || !supabase || !session) return;
-    let cancelled = false;
-    Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()])
-      .then(([freshTools, freshHistory]) => {
-        if (cancelled) return;
-        setTools(freshTools);
-        setToolHistory(freshHistory);
-      })
-      .catch(error => console.error("Could not open current tool register", error));
-    return () => { cancelled = true; };
+    refreshToolData().catch(error => console.error("Could not open current tool data", error));
   }, [toolsOpen, session?.user?.id]);
 
   useEffect(() => {
@@ -508,6 +651,7 @@ function App() {
         return;
       }
 
+      setCurrentProfile(null);
       setProfileLoading(true);
       try {
         const { data: profile, error } = await supabase
@@ -522,7 +666,9 @@ function App() {
         setCurrentProfile(profile || {
           id: currentUser.id,
           full_name: currentUser.email || "User",
-          role: currentUser.user_metadata?.role || "employee",
+          // Never grant admin UI from user-editable auth metadata. The
+          // protected public.profiles row is the only role authority.
+          role: "employee",
           active: true
         });
       } catch (error) {
@@ -548,6 +694,7 @@ function App() {
   const currentRole = currentProfile?.role === "admin" ? "admin" : "employee";
   const isAdminUser = currentRole === "admin" && currentProfile?.active !== false;
   const activeView = isAdminUser ? view : "employee";
+  const currentActorName = currentProfile?.full_name || currentUser?.email || CURRENT_USER;
 
   useEffect(() => {
     if (!currentUser || profileLoading) return;
@@ -557,22 +704,6 @@ function App() {
       setView("employee");
     }
   }, [currentUser?.id, profileLoading, isAdminUser]);
-
-  useEffect(() => {
-    if (!session || !supabase || !isAdminUser) return;
-    let active = true;
-    Promise.all([fetchEmployeeCostsFromSupabase(), fetchJobFinancialsFromSupabase()])
-      .then(([costs, financials]) => {
-        if (!active) return;
-        setData(current => ({
-          ...current,
-          teamMembers: current.teamMembers.map(worker => ({ ...worker, internalHourlyCost: costs[worker.id] ?? "" })),
-          jobs: current.jobs.map(job => ({ ...job, jobValue: financials[job.id] ?? "" }))
-        }));
-      })
-      .catch(error => console.error("Could not load admin financial data", error));
-    return () => { active = false; };
-  }, [session?.user?.id, isAdminUser]);
 
   useEffect(() => {
     if (!currentUser || isAdminUser || !data.teamMembers.length) return;
@@ -595,11 +726,18 @@ function App() {
   }, [isAdminUser, data.teamMembers, employeeId]);
 
   const days = useMemo(() => Array.from({ length: calendarDayCount }, (_, i) => addDays(weekStart, i)), [weekStart, calendarDayCount]);
-  const employeeDays = useMemo(() => Array.from({ length: 14 }, (_, i) => addDays(new Date(), i)), []);
+  const employeeDays = useMemo(() => Array.from({ length: 14 }, (_, i) => addDays(new Date(`${todayKey}T00:00:00`), i)), [todayKey]);
 
   const clientOptions = useMemo(() => Array.from(new Set(data.jobs.map(j => j.client).filter(Boolean))).sort(), [data.jobs]);
   const unreadMessages = data.messages.filter(m => m.unread).length;
   const calendarDayMin = calendarDayCount >= 14 ? "118px" : calendarDayCount >= 10 ? "150px" : calendarDayCount <= 5 ? "280px" : "220px";
+  const toolWorkers = useMemo(() => {
+    const byId = new Map();
+    [...(toolWorkerDirectory || []), ...(data.teamMembers || [])].forEach(worker => {
+      if (worker?.id) byId.set(worker.id, { ...(byId.get(worker.id) || {}), ...worker });
+    });
+    return [...byId.values()];
+  }, [toolWorkerDirectory, data.teamMembers]);
 
   const visibleWorkers = useMemo(() => {
     return data.teamMembers.filter(worker => {
@@ -625,14 +763,28 @@ function App() {
 
   const scheduledJobs = data.jobs.filter(job => job.category !== "Cancelled" && jobHasAnyBooking(job));
 
-  function updateData(next) { setData(next); saveData(next); }
+  function updateData(nextOrUpdater) {
+    const current = dataRef.current;
+    const next = typeof nextOrUpdater === "function"
+      ? nextOrUpdater(current)
+      : nextOrUpdater;
+    dataRef.current = next;
+    setData(next);
+    saveData(next);
+    return next;
+  }
+
   function updateJobs(mutator, options = {}) {
-    const before = data.jobs;
-    const nextJobs = before.map(mutator);
-    updateData({ ...data, jobs: nextJobs });
+    let changed = [];
+    updateData(current => {
+      const before = current.jobs || [];
+      const nextJobs = before.map(mutator);
+      changed = nextJobs.filter((job, index) => JSON.stringify(job) !== JSON.stringify(before[index]));
+      return { ...current, jobs: nextJobs };
+    });
+
     if (options.persist !== false && isAdminUser && session && supabase) {
-      const changed = nextJobs.filter((job, index) => JSON.stringify(job) !== JSON.stringify(before[index]));
-      changed.forEach(job => persistJobToSupabase(job).catch(err => {
+      changed.forEach(job => queuePersistJobToSupabase(job).catch(err => {
         console.error("Could not sync job to Supabase", err);
         setJobsSyncMessage(err?.message ? `Supabase job sync failed: ${err.message}` : "Supabase job sync failed.");
       }));
@@ -640,7 +792,14 @@ function App() {
     }
   }
   function logJob(job, action, details) {
-    return { ...job, jobHistory: [{ id: createId(), date: new Date().toISOString(), user: CURRENT_USER, action, details }, ...(job.jobHistory || [])] };
+    const actor = currentActorName;
+    return {
+      ...job,
+      jobHistory: [
+        { id: createId(), date: new Date().toISOString(), user: actor, action, details },
+        ...(job.jobHistory || [])
+      ]
+    };
   }
   function getDraggedJobId(e) {
     const context = readDragContext(e);
@@ -704,8 +863,7 @@ function App() {
       if (j.id !== job.id) return j;
       const endDate = getIsoDate(addDays(new Date(date + "T00:00:00"), copiedBooking.durationDays || 0));
       const scheduleBlocks = [...(j.scheduleBlocks || []), { id: createId(), workerId, startDate: date, endDate }];
-      const assignedTo = (j.assignedTo || []).includes(workerId) ? j.assignedTo : [...(j.assignedTo || []), workerId];
-      return logJob({ ...j, assignedTo, scheduleBlocks, category: "Scheduled", completedConfirmed: false, jobStatus: isDefectJob(j) ? "Call back - Defects" : "Scheduled" }, "Booking pasted", `Copied booking pasted to ${workerName} on ${date}.`);
+      return logJob({ ...j, scheduleBlocks, category: "Scheduled", completedConfirmed: false, jobStatus: isDefectJob(j) ? "Call back - Defects" : "Scheduled" }, "Booking pasted", `Copied booking pasted to ${workerName} on ${date}.`);
     });
     setSelectedBooking({ jobId: job.id, workerId, date });
   }
@@ -740,26 +898,26 @@ function App() {
       const parsed = parseAimJobSheet(text);
       const job = normaliseJob({ ...emptyJob(), ...parsed, category: "To be scheduled" });
       const loggedJob = logJob(job, "Created", `Created from PDF: ${file.name}`);
-      updateData({ ...data, jobs: [loggedJob, ...data.jobs] });
-      if (session && supabase) persistJobToSupabase(loggedJob).catch(err => setJobsSyncMessage(`Supabase job sync failed: ${err.message}`));
+      updateData(current => ({ ...current, jobs: [loggedJob, ...(current.jobs || [])] }));
+      if (session && supabase) queuePersistJobToSupabase(loggedJob).catch(err => setJobsSyncMessage(`Supabase job sync failed: ${err.message}`));
       setActiveCategory("To be scheduled");
     } catch (err) { console.error(err); alert("The PDF could not be read. It may be scanned/image-based."); }
   }
 
   async function saveJob(jobToSave) {
-    const exists = data.jobs.some(j => j.id === jobToSave.id);
+    const exists = dataRef.current.jobs.some(j => j.id === jobToSave.id);
     let next = normaliseJob(jobToSave);
     next = logJob(next, exists ? "Updated" : "Created", exists ? "Job details saved." : "Job created.");
-    updateData({ ...data, jobs: exists ? data.jobs.map(j => j.id === next.id ? next : j) : [next, ...data.jobs] });
+    updateData(current => ({ ...current, jobs: exists ? current.jobs.map(j => j.id === next.id ? next : j) : [next, ...current.jobs] }));
     setEditingJob(null);
     if (session && supabase) {
       try {
         setJobsSyncMessage("Saving job to Supabase...");
-        await persistJobToSupabase(next);
+        await queuePersistJobToSupabase(next);
         if (isAdminUser) {
           await saveJobFinancialToSupabase(next);
           await syncJobMachineryBookingsToSupabase(next.id, next.machineryBookings || []);
-          setMachineryBookings(await fetchMachineryBookingsFromSupabase());
+          await refreshMachineryData();
         }
         setJobsSyncMessage(`Saved ${next.title || "job"} to Supabase.`);
       } catch (err) {
@@ -773,19 +931,49 @@ function App() {
   function cancelOrDeleteJob(job) {
     if (job.category === "Cancelled") {
       if (!confirm("Are you sure that you want to permanently delete this job?")) return;
-      updateData({ ...data, jobs: data.jobs.filter(j => j.id !== job.id) });
+      updateData(current => ({ ...current, jobs: current.jobs.filter(j => j.id !== job.id) }));
       if (session && supabase) deleteJobFromSupabase(job.id).catch(err => setJobsSyncMessage(`Supabase delete failed: ${err.message}`));
       return;
     }
     if (!confirm("Move this job to the Cancelled bucket?")) return;
-    updateJobs(j => j.id === job.id ? logJob({ ...j, category: "Cancelled" }, "Cancelled", "Job moved to Cancelled bucket.") : j);
+    moveToBucket(job.id, "Cancelled");
   }
 
   function moveToBucket(jobId, category) {
     if (category === "All") return;
     updateJobs(job => {
       if (job.id !== jobId) return job;
-      const updated = { ...job, category, assignedTo: category === "Scheduled" ? job.assignedTo : [], startDate: category === "Scheduled" ? job.startDate : "", endDate: category === "Scheduled" ? job.endDate : "", scheduleBlocks: category === "Scheduled" ? (job.scheduleBlocks || []) : [] };
+
+      // A booking removed from the live calendar is still part of the job's
+      // audit and labour record. Archive the current visit before clearing the
+      // active schedule so a later reschedule cannot erase time, notes or the
+      // employee completion state from the earlier attendance.
+      const clearsActiveSchedule = category !== "Scheduled" && category !== "Completed";
+      const hadActiveVisit = jobHasAnyBooking(job) || hasCurrentVisitActivity(job);
+      const archivedAt = new Date().toISOString();
+      const priorVisits = clearsActiveSchedule && hadActiveVisit
+        ? appendCurrentVisitSnapshot(job, category === "Cancelled" ? "cancelled" : "removed_from_schedule", archivedAt)
+        : (job.priorVisits || []);
+
+      const updated = clearsActiveSchedule
+        ? {
+            ...job,
+            category,
+            priorVisits,
+            pendingReschedule: category !== "Cancelled",
+            assignedTo: [],
+            primaryBookingIds: {},
+            startDate: "",
+            endDate: "",
+            scheduleBlocks: [],
+            currentVisitId: "",
+            currentVisitStartedAt: "",
+            workerStatus: {},
+            workerCompletions: {},
+            completedConfirmed: false
+          }
+        : { ...job, category };
+
       return logJob(updated, "Status changed", `Moved to ${category}.`);
     });
   }
@@ -795,6 +983,7 @@ function App() {
       if (job.id !== jobId) return job;
       const wasConfirmed = Boolean(job.clientAccepted);
       const wasCompleted = job.category === "Completed" || job.completedConfirmed;
+      const wasMarkedForReschedule = Boolean(job.pendingReschedule);
       let notify = false;
       let keepConfirmed = wasConfirmed;
       let isDefectCallback = Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects");
@@ -842,11 +1031,10 @@ function App() {
         updated = { ...job, category: "Scheduled", clientAccepted: keepConfirmed };
       } else {
         const scheduleBlocks = [...(job.scheduleBlocks || []), { id: createId(), workerId, startDate: date, endDate: date }];
-        const assignedTo = job.assignedTo.includes(workerId) ? job.assignedTo : [...job.assignedTo, workerId];
-        updated = { ...job, assignedTo, scheduleBlocks, category: "Scheduled", clientAccepted: keepConfirmed };
+        updated = { ...job, scheduleBlocks, category: "Scheduled", clientAccepted: keepConfirmed };
       }
 
-      const isTrueReschedule = wasCompleted || allExistingBookingsArePast || isMovingFromCalendar;
+      const isTrueReschedule = wasCompleted || wasMarkedForReschedule || allExistingBookingsArePast || isMovingFromCalendar;
       if (isTrueReschedule) {
         const resetAt = new Date().toISOString();
         const previousWorkerIds = Array.from(new Set([
@@ -887,9 +1075,12 @@ function App() {
           workerStatus: resetWorkerStatus,
           workerCompletions: {},
           completedConfirmed: false,
+          pendingReschedule: false,
           category: "Scheduled"
         };
       }
+
+      updated = { ...updated, pendingReschedule: false };
 
       if (isDefectCallback) {
         updated = { ...updated, jobStatus: "Call back - Defects", isDefectCallback: true, completedConfirmed: false };
@@ -936,10 +1127,10 @@ function App() {
         attachments: []
       });
       let loggedJob = logJob(job, "Created", item.type === "travel" ? "Travel/accommodation comment added." : "Ad hoc job added.");
-      updateData({ ...data, jobs: [loggedJob, ...data.jobs] });
+      updateData(current => ({ ...current, jobs: [loggedJob, ...(current.jobs || [])] }));
       if (session && supabase) {
         try {
-          await persistJobToSupabase(loggedJob);
+          await queuePersistJobToSupabase(loggedJob);
           if (item.type === "travel" && item.travelPdfFile) {
             const uploadedPdf = await uploadAttachmentToSupabase({
               jobId: loggedJob.id,
@@ -951,8 +1142,11 @@ function App() {
               uploadedBy: currentUser?.id || null
             });
             loggedJob = logJob({ ...loggedJob, attachments: [...(loggedJob.attachments || []), uploadedPdf] }, "Accommodation PDF uploaded", "Accommodation confirmation PDF uploaded to Supabase Storage.");
-            updateData({ ...data, jobs: [loggedJob, ...data.jobs] });
-            await persistJobToSupabase(loggedJob);
+            updateData(current => ({
+              ...current,
+              jobs: current.jobs.map(existingJob => existingJob.id === loggedJob.id ? loggedJob : existingJob)
+            }));
+            await queuePersistJobToSupabase(loggedJob);
           }
         } catch (err) {
           setJobsSyncMessage(`Supabase job sync failed: ${err.message}`);
@@ -961,7 +1155,7 @@ function App() {
       }
     } else if (item.type === "leave") {
       const leave = { id: createId(), workerId: item.workerId, leaveType: item.leaveType, startDate: item.startDate, endDate: item.endDate, notes: item.notes || "" };
-      updateData({ ...data, leaveRecords: [leave, ...data.leaveRecords] });
+      updateData(current => ({ ...current, leaveRecords: [leave, ...(current.leaveRecords || [])] }));
     }
     setCalendarPopup(null);
   }
@@ -969,20 +1163,23 @@ function App() {
   async function saveWorkers(workers, deletedWorkerIds = []) {
     if (!isAdminUser) throw new Error("Only admin users can add or edit employees.");
     if (!session || !supabase) {
-      updateData({ ...data, teamMembers: workers });
+      updateData(current => ({ ...current, teamMembers: workers }));
       return workers;
     }
 
     setWorkersLoading(true);
     try {
       if (deletedWorkerIds.length) await deleteWorkersFromSupabase(deletedWorkerIds);
-      await saveWorkersToSupabase(workers);
-      await saveEmployeeCostsToSupabase(workers);
+      const savedWorkers = await saveWorkersToSupabase(workers);
+      // Use the UUIDs returned by the worker upsert. The previous implementation
+      // skipped the cost for a newly-added worker because its temporary local ID
+      // was not a UUID yet.
+      await saveEmployeeCostsToSupabase(savedWorkers);
       const freshWorkersBase = await fetchWorkersFromSupabase();
       const costMap = await fetchEmployeeCostsFromSupabase();
       const freshWorkers = freshWorkersBase.map(worker => ({ ...worker, internalHourlyCost: costMap[worker.id] ?? "" }));
       setBackendWorkers(freshWorkers);
-      updateData({ ...data, teamMembers: freshWorkers });
+      updateData(current => ({ ...current, teamMembers: freshWorkers }));
       setSupabaseCheck({
         status: "connected",
         workers: freshWorkers,
@@ -1033,7 +1230,7 @@ function App() {
         jobId: job.id,
         direction: "out",
         channel: "sms",
-        from: CURRENT_USER,
+        from: currentActorName,
         to: job.clientPhone,
         text: messageText,
         date: new Date().toISOString(),
@@ -1044,22 +1241,24 @@ function App() {
     }
 
     let changedJob = null;
-    const nextJobs = data.jobs.map(j => {
-      if (j.id !== job.id) return j;
-      changedJob = logJob({ ...j, appointmentSent: true }, "SMS sent", "SMS sent from Jobsched.");
-      return changedJob;
+    updateData(current => {
+      const nextJobs = current.jobs.map(j => {
+        if (j.id !== job.id) return j;
+        changedJob = logJob({ ...j, appointmentSent: true }, "SMS sent", "SMS sent from AIM CG.");
+        return changedJob;
+      });
+      const nextMessages = savedMessage?.id
+        ? [savedMessage, ...current.messages.filter(m => m.id !== savedMessage.id)]
+        : current.messages;
+      return { ...current, messages: nextMessages, jobs: nextJobs };
     });
-    const nextMessages = savedMessage?.id
-      ? [savedMessage, ...data.messages.filter(m => m.id !== savedMessage.id)]
-      : data.messages;
-    updateData({ ...data, messages: nextMessages, jobs: nextJobs });
 
     if (changedJob && session && supabase) {
-      persistJobToSupabase(changedJob).catch(err => setJobsSyncMessage(`Supabase job sync failed: ${err.message}`));
+      queuePersistJobToSupabase(changedJob).catch(err => setJobsSyncMessage(`Supabase job sync failed: ${err.message}`));
       insertJobHistoryToSupabase({
         jobId: job.id,
         action: "SMS sent",
-        details: "SMS sent from Jobsched via ClickSend.",
+        details: "SMS sent from AIM CG via ClickSend.",
         createdBy: currentUser?.id || null
       }).catch(err => console.error("Could not save message history", err));
     }
@@ -1067,43 +1266,48 @@ function App() {
   }
 
   async function markMessageActioned(message, options = {}) {
-    const job = data.jobs.find(j => j.id === message.jobId);
+    const job = dataRef.current.jobs.find(j => j.id === message.jobId);
     const allowConfirmBooking = options.allowConfirmBooking !== false;
     const confirmBooking = allowConfirmBooking && message.direction === "in" && job && !job.clientAccepted
       ? confirm("Do you want to confirm this booking from the message?")
       : false;
-    const actionText = options.noteText || `Message actioned by ${CURRENT_USER} on ${formatDateTime(new Date().toISOString())}.`;
+    const actionText = options.noteText || `Message actioned by ${currentActorName} on ${formatDateTime(new Date().toISOString())}.`;
 
     const actionedAt = new Date().toISOString();
-    updateData({
-      ...data,
-      messages: data.messages.map(m =>
+    let changedJob = null;
+    updateData(current => ({
+      ...current,
+      messages: current.messages.map(m =>
         m.id === message.id
-          ? { ...m, unread: false, actioned: true, actionedBy: CURRENT_USER, actionedAt }
+          ? { ...m, unread: false, actioned: true, actionedBy: currentActorName, actionedAt }
           : m
       ),
-      jobs: data.jobs.map(j => {
+      jobs: current.jobs.map(j => {
         if (j.id !== message.jobId) return j;
-        const note = { id: createId(), date: actionedAt, user: CURRENT_USER, text: actionText };
-        return logJob(
+        const note = { id: createId(), date: actionedAt, user: currentActorName, text: actionText };
+        changedJob = logJob(
           { ...j, clientAccepted: confirmBooking ? true : j.clientAccepted, noteHistory: [note, ...(j.noteHistory || [])] },
           options.historyAction || "Message actioned",
           options.historyDetails || (confirmBooking ? "Message actioned and booking confirmed." : "Message actioned from inbox.")
         );
+        return changedJob;
       })
-    });
-    if (session && supabase && isUuid(message.id)) {
+    }));
+    if (session && supabase) {
       try {
-        await markMessageActionedInSupabase({ messageId: message.id, actionedBy: currentUser?.id || null });
+        if (isUuid(message.id)) {
+          await markMessageActionedInSupabase({ messageId: message.id, actionedBy: currentUser?.id || null });
+        }
+        if (changedJob) await queuePersistJobToSupabase(changedJob);
       } catch (err) {
-        console.error("Could not mark message actioned in Supabase", err);
+        console.error("Could not persist the message action in Supabase", err);
         setJobsSyncMessage(`Message action failed: ${err.message}`);
       }
     }
   }
 
   async function replyToMessage(message, replyText) {
-    const job = data.jobs.find(j => j.id === message.jobId);
+    const job = dataRef.current.jobs.find(j => j.id === message.jobId);
     if (!job) throw new Error("This message is not linked to a job.");
 
     const messageText = String(replyText || "").trim();
@@ -1127,7 +1331,7 @@ function App() {
             jobId: job.id,
             direction: "out",
             channel: "sms",
-            from: CURRENT_USER,
+            from: currentActorName,
             to: recipient,
             phoneNumber: recipient,
             text: messageText,
@@ -1144,7 +1348,7 @@ function App() {
         jobId: job.id,
         direction: "out",
         channel: "sms",
-        from: CURRENT_USER,
+        from: currentActorName,
         to: recipient,
         phoneNumber: recipient,
         text: messageText,
@@ -1156,37 +1360,42 @@ function App() {
     }
 
     const actionedAt = new Date().toISOString();
-    const actionText = `Reply sent and inbound message actioned by ${CURRENT_USER} on ${formatDateTime(actionedAt)}.`;
-    const actionedMessage = { ...message, unread: false, actioned: true, actionedBy: CURRENT_USER, actionedAt };
-    const nextMessages = [savedMessage, ...data.messages.map(m => m.id === message.id ? actionedMessage : m).filter(m => m.id !== savedMessage.id)];
-
-    updateData({
-      ...data,
-      messages: nextMessages,
-      jobs: data.jobs.map(j => {
-        if (j.id !== job.id) return j;
-        const note = { id: createId(), date: actionedAt, user: CURRENT_USER, text: `${actionText}
+    const actionText = `Reply sent and inbound message actioned by ${currentActorName} on ${formatDateTime(actionedAt)}.`;
+    const actionedMessage = { ...message, unread: false, actioned: true, actionedBy: currentActorName, actionedAt };
+    let changedJob = null;
+    updateData(current => {
+      const nextMessages = [
+        savedMessage,
+        ...current.messages
+          .map(m => m.id === message.id ? actionedMessage : m)
+          .filter(m => m.id !== savedMessage.id)
+      ];
+      return {
+        ...current,
+        messages: nextMessages,
+        jobs: current.jobs.map(j => {
+          if (j.id !== job.id) return j;
+          const note = { id: createId(), date: actionedAt, user: currentActorName, text: `${actionText}
 
 Reply: ${messageText}` };
-        return logJob(
-          { ...j, appointmentSent: true, noteHistory: [note, ...(j.noteHistory || [])] },
-          "SMS reply sent",
-          "Reply sent from message inbox and original message actioned."
-        );
-      })
+          changedJob = logJob(
+            { ...j, appointmentSent: true, noteHistory: [note, ...(j.noteHistory || [])] },
+            "SMS reply sent",
+            "Reply sent from message inbox and original message actioned."
+          );
+          return changedJob;
+        })
+      };
     });
 
-    if (session && supabase && isUuid(message.id)) {
+    if (session && supabase) {
       try {
-        await markMessageActionedInSupabase({ messageId: message.id, actionedBy: currentUser?.id || null });
-        await insertJobHistoryToSupabase({
-          jobId: job.id,
-          action: "SMS reply sent",
-          details: "Reply sent from Jobsched and original message actioned.",
-          createdBy: currentUser?.id || null
-        });
+        if (isUuid(message.id)) {
+          await markMessageActionedInSupabase({ messageId: message.id, actionedBy: currentUser?.id || null });
+        }
+        if (changedJob) await queuePersistJobToSupabase(changedJob);
       } catch (err) {
-        console.error("Could not mark replied message actioned in Supabase", err);
+        console.error("Could not persist the SMS reply action in Supabase", err);
         setJobsSyncMessage(`Message action failed: ${err.message}`);
       }
     }
@@ -1225,7 +1434,7 @@ Reply: ${messageText}` };
 
     if (session && supabase && isUuid(jobId) && isUuid(workerId)) {
       try {
-        const currentJob = data.jobs.find(item => item.id === jobId);
+        const currentJob = dataRef.current.jobs.find(item => item.id === jobId);
         const rawPriorStatus = currentJob?.workerStatus?.[workerId] || { status: "notStarted", totalMs: 0, runningSince: null };
         const currentVisitId = getCurrentVisitId(currentJob);
         const priorStatus = (!isDefectJob(currentJob) || !currentVisitId || rawPriorStatus.visitId === currentVisitId)
@@ -1259,7 +1468,7 @@ Reply: ${messageText}` };
   function confirmJobComplete(jobId) {
     updateJobs(job => {
       if (job.id !== jobId) return job;
-      return logJob({ ...job, category: "Completed", jobStatus: "Completed", completedConfirmed: true }, "Completed", "Supervisor confirmed job complete from calendar.");
+      return logJob({ ...job, category: "Completed", jobStatus: "Completed", completedConfirmed: true, completedAt: new Date().toISOString() }, "Completed", "Supervisor confirmed job complete from calendar.");
     });
   }
 
@@ -1334,50 +1543,53 @@ Reply: ${messageText}` };
 
   async function saveEmployeeCompletion(jobId, workerId, completion) {
     let changedJob = null;
-    const nextJobs = data.jobs.map(job => {
-      if (job.id !== jobId) return job;
+    let workerName = getWorkerName(dataRef.current.teamMembers, workerId);
 
-      const workerName = getWorkerName(data.teamMembers, workerId);
-      const workerCompletions = {
-        ...(job.workerCompletions || {}),
-        [workerId]: {
-          ...(job.workerCompletions?.[workerId] || {}),
-          ...completion,
-          visitId: getCurrentVisitId(job) || null,
-          submittedComplete: getCurrentWorkerStatus(job, workerId) === "completed",
-          updatedAt: new Date().toISOString(),
-          updatedBy: workerName
-        }
+    updateData(current => {
+      workerName = getWorkerName(current.teamMembers, workerId);
+      const nextJobs = (current.jobs || []).map(job => {
+        if (job.id !== jobId) return job;
+
+        const workerCompletions = {
+          ...(job.workerCompletions || {}),
+          [workerId]: {
+            ...(job.workerCompletions?.[workerId] || {}),
+            ...completion,
+            visitId: getCurrentVisitId(job) || null,
+            submittedComplete: getCurrentWorkerStatus(job, workerId) === "completed",
+            updatedAt: new Date().toISOString(),
+            updatedBy: workerName
+          }
+        };
+
+        changedJob = logJob(
+          { ...job, workerCompletions },
+          "Completion update",
+          completion.requiresAnotherTrade
+            ? `${workerName} added completion notes and requested follow-up attendance from another trade.`
+            : `${workerName} added completion notes.`
+        );
+        return changedJob;
+      });
+
+      return {
+        ...current,
+        jobs: nextJobs,
+        messages: completion.requiresAnotherTrade
+          ? [{
+              id: createId(),
+              jobId,
+              direction: "internal",
+              from: workerName,
+              text: `Completion note: job requires another trade. ${completion.followUpTrade ? `Suggested trade: ${completion.followUpTrade}. ` : ""}${completion.completionDescription || ""}`,
+              date: new Date().toISOString(),
+              unread: true
+            }, ...(current.messages || [])]
+          : current.messages
       };
-
-      changedJob = logJob(
-        { ...job, workerCompletions },
-        "Completion update",
-        completion.requiresAnotherTrade
-          ? `${workerName} added completion notes and requested follow-up attendance from another trade.`
-          : `${workerName} added completion notes.`
-      );
-      return changedJob;
-    });
-
-    updateData({
-      ...data,
-      jobs: nextJobs,
-      messages: completion.requiresAnotherTrade
-        ? [{
-            id: createId(),
-            jobId,
-            direction: "internal",
-            from: getWorkerName(data.teamMembers, workerId),
-            text: `Completion note: job requires another trade. ${completion.followUpTrade ? `Suggested trade: ${completion.followUpTrade}. ` : ""}${completion.completionDescription || ""}`,
-            date: new Date().toISOString(),
-            unread: true
-          }, ...data.messages]
-        : data.messages
     });
 
     if (changedJob && session && supabase) {
-      const workerName = getWorkerName(data.teamMembers, workerId);
       const noteParts = [
         completion.completionDescription ? `Works: ${completion.completionDescription}` : "",
         completion.materialsUsed ? `Materials: ${completion.materialsUsed}` : "",
@@ -1475,15 +1687,11 @@ Reply: ${messageText}` };
         <ToolRegisterPage
           tools={tools}
           history={toolHistory}
-          workers={data.teamMembers}
+          workers={toolWorkers}
           currentWorkerId={employeeId}
           isAdmin={isAdminUser}
           onClose={()=>setToolsOpen(false)}
-          onRefresh={async()=>{
-            const [freshTools, freshHistory] = await Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()]);
-            setTools(freshTools);
-            setToolHistory(freshHistory);
-          }}
+          onRefresh={refreshToolData}
         />
       ) : activeView === "admin" ? (
         <>
@@ -1499,7 +1707,7 @@ Reply: ${messageText}` };
           {adminTab === "attention" ? (
             <NeedsAttentionView jobs={data.jobs} workers={data.teamMembers} days={days} leaveRecords={data.leaveRecords} messages={data.messages} activeTab={dashboardTab} setActiveTab={setDashboardTab} onOpenJob={setEditingJob} />
           ) : adminTab === "machinery" ? (
-            <MachineryView machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} days={days} selectedMachineId={selectedMachineId} setSelectedMachineId={setSelectedMachineId} onAddBooking={(context)=>setMachineryBookingOpen(context)} onEditBooking={(booking)=>setMachineryBookingOpen({ booking })} />
+            <MachineryView machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} days={days} selectedMachineId={selectedMachineId} setSelectedMachineId={setSelectedMachineId} onAddBooking={(context)=>setMachineryBookingOpen(context)} onEditBooking={(booking)=>setMachineryBookingOpen({ booking })} onRefresh={refreshMachineryData} />
           ) : (
           <main className="workspace">
             <aside className={`bucket-panel ${bucketsCollapsed ? "collapsed" : ""}`}>
@@ -1556,12 +1764,10 @@ Reply: ${messageText}` };
         />
       )}
 
-      <footer className="footer-actions"><button className="ghost" onClick={()=>{if(confirm("Reset demo data?")){updateData(initialData)}}}><RotateCcw size={15}/> Reset demo data</button></footer>
-
-      {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} isAdmin={isAdminUser} currentUser={currentUser} messages={data.messages} machines={machinery} machineryBookings={machineryBookings} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} onReplyMessage={replyToMessage} />}
+      {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} isAdmin={isAdminUser} currentUser={currentUser} actorName={currentActorName} messages={data.messages} machines={machinery} machineryBookings={machineryBookings} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} onReplyMessage={replyToMessage} />}
       {reportsOpen && isAdminUser && <ReportsModal jobs={data.jobs} workers={data.teamMembers} onClose={()=>setReportsOpen(false)} />}
-      {machinerySettingsOpen && isAdminUser && <MachinerySettingsModal machines={machinery} onClose={()=>setMachinerySettingsOpen(false)} onSave={async(items)=>{try{await saveMachineryToSupabase(items);setMachinery(await fetchMachineryFromSupabase());setMachinerySettingsOpen(false);}catch(err){alert(err.message||"Could not save machinery");}}} />}
-      {machineryBookingOpen && isAdminUser && <MachineryBookingModal context={machineryBookingOpen} machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} onClose={()=>setMachineryBookingOpen(null)} onSave={async(booking)=>{try{await saveMachineryBookingToSupabase(booking);setMachineryBookings(await fetchMachineryBookingsFromSupabase());setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not save machinery booking");}}} onDelete={async(id)=>{if(!confirm("Delete this machinery booking?"))return;await deleteMachineryBookingFromSupabase(id);setMachineryBookings(await fetchMachineryBookingsFromSupabase());setMachineryBookingOpen(null);}} />}
+      {machinerySettingsOpen && isAdminUser && <MachinerySettingsModal machines={machinery} onClose={()=>setMachinerySettingsOpen(false)} onSave={async(items)=>{try{await saveMachineryToSupabase(items);await refreshMachineryData();setMachinerySettingsOpen(false);}catch(err){alert(err.message||"Could not save machinery");}}} />}
+      {machineryBookingOpen && isAdminUser && <MachineryBookingModal context={machineryBookingOpen} machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} onClose={()=>setMachineryBookingOpen(null)} onSave={async(booking)=>{try{await saveMachineryBookingToSupabase(booking);await refreshMachineryData();setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not save machinery booking");}}} onDelete={async(id)=>{if(!confirm("Delete this machinery booking?"))return;try{await deleteMachineryBookingFromSupabase(id);await refreshMachineryData();setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not delete machinery booking");}}} />}
       {calendarPopup && <CalendarItemModal context={calendarPopup} onClose={()=>setCalendarPopup(null)} onSave={saveCalendarItem}/>} 
       {peopleOpen && isAdminUser && <PeopleModal workers={data.teamMembers} usingSupabase={Boolean(session && supabase)} saving={workersLoading} onClose={()=>setPeopleOpen(false)} onSave={async (workers)=>{
         try {
@@ -1682,7 +1888,7 @@ function PasswordSetupPanel({ mode, email, onSave, onCancel }) {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const heading = mode === "invite" ? "Create your AIM CG password" : mode === "recovery" ? "Reset your AIM CG password" : "Set or change your Jobsched password";
+  const heading = mode === "invite" ? "Create your AIM CG password" : mode === "recovery" ? "Reset your AIM CG password" : "Set or change your AIM CG password";
   const hint = mode === "invite"
     ? "You have accepted an invite. Create a password now so you can sign in normally next time."
     : mode === "recovery"
@@ -1744,10 +1950,13 @@ function NeedsAttentionDashboard({ jobs, workers, days, leaveRecords, messages, 
   const unread = messages.filter(m => m.unread).length;
   const missingMaterials = activeJobs.filter(isAwaitingMaterials);
   const unconfirmedScheduled = activeJobs.filter(j => j.category === "Scheduled" && !j.clientAccepted);
-  const conflictJobs = activeJobs.filter(job => (job.assignedTo || []).some(workerId => {
+  const conflictJobs = activeJobs.filter(job => getAllAssignedWorkerIds(job).some(workerId => {
     const worker = workers.find(w => w.id === workerId);
-    if (!worker || !job.startDate || !job.endDate) return false;
-    return getDatesInRange(job.startDate, job.endDate).some(date => getWorkerAvailability(worker, date, leaveRecords).status !== "Onsite");
+    if (!worker) return false;
+    return days.some(day => {
+      const iso = getIsoDate(day);
+      return jobOccursForWorkerOnDate(job, workerId, iso) && getWorkerAvailability(worker, iso, leaveRecords).status !== "Onsite";
+    });
   }));
   const cards = [
     { label: "Action needed", count: notReady.length, hint: "Jobs needing action" },
@@ -1969,8 +2178,10 @@ function JobCard({ job, workerNames, selected, onSelect, onDragStart, onEdit, on
   );
 }
 
-function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [], machines = [], machineryBookings = [], onClose, onSave, onSendMessage, onActionMessage, onReplyMessage }) {
-  const [form, setForm] = useState(normaliseJob({ ...job, machineryBookings: (job.machineryBookings?.length ? job.machineryBookings : machineryBookings.filter(b=>b.jobId===job.id)) }));
+function JobModal({ job, teamMembers, currentUser, actorName = CURRENT_USER, isAdmin = false, messages = [], machines = [], machineryBookings = [], onClose, onSave, onSendMessage, onActionMessage, onReplyMessage }) {
+  const initialMachineryRows = job.machineryBookings?.length ? job.machineryBookings : machineryBookings.filter(b=>b.jobId===job.id);
+  const [form, setForm] = useState(normaliseJob({ ...job, machineryBookings: initialMachineryRows }));
+  const machineryTouchedRef = useRef(false);
   const [activeTab, setActiveTab] = useState(job._openClientTab ? "client" : "details");
   const [noteInput, setNoteInput] = useState("");
   const [showNoteInTradeView, setShowNoteInTradeView] = useState(false);
@@ -1985,6 +2196,14 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
       .sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0)),
     [messages, form.id]
   );
+  useEffect(() => {
+    if (machineryTouchedRef.current) return;
+    const remoteRows = machineryBookings.filter(booking => booking.jobId === job.id);
+    if (!remoteRows.length) return;
+    setForm(current => current.machineryBookings?.length
+      ? current
+      : { ...current, machineryBookings: remoteRows });
+  }, [job.id, machineryBookings]);
   const tabs = ["details","scheduling","client","notes","materials","attachments","history"];
   function update(field, value){ setForm({...form,[field]:value}); }
   function updateStartDate(value){
@@ -1995,7 +2214,7 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
     }));
   }
   function toggleWorker(id){ const list=form.assignedTo||[]; update("assignedTo", list.includes(id)?list.filter(x=>x!==id):[...list,id]); }
-  function addNote(){ if(!noteInput.trim()) return; setForm(cur=>({...cur,noteHistory:[{id:createId(),date:new Date().toISOString(),user:CURRENT_USER,text:noteInput.trim(),showInTradeView:Boolean(showNoteInTradeView)},...(cur.noteHistory||[])]})); setNoteInput(""); setShowNoteInTradeView(false); }
+  function addNote(){ if(!noteInput.trim()) return; setForm(cur=>({...cur,noteHistory:[{id:createId(),date:new Date().toISOString(),user:actorName,text:noteInput.trim(),showInTradeView:Boolean(showNoteInTradeView)},...(cur.noteHistory||[])]})); setNoteInput(""); setShowNoteInTradeView(false); }
   function addMaterial(){ if(!materialInput.trim()) return; setForm(cur=>({...cur,materials:[...(cur.materials||[]),{id:createId(),text:materialInput.trim(),status:"Required"}]})); setMaterialInput(""); }
   async function addAttachments(files){
     const fileList = [...(files || [])];
@@ -2039,9 +2258,9 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
     }));
   }
   function removeScheduleBlock(id){ setForm(cur=>({...cur,scheduleBlocks:(cur.scheduleBlocks||[]).filter(b=>b.id!==id)})); }
-  function addMachineryBooking(){ setForm(cur=>({...cur,machineryBookings:[...(cur.machineryBookings||[]),{id:createId(),machineId:"",workerId:"",startDate:cur.startDate||getIsoDate(new Date()),endDate:cur.endDate||cur.startDate||getIsoDate(new Date()),period:"full_day",bookingType:"job",description:""}]})); }
-  function updateMachineryBooking(id, field, value){ setForm(cur=>({...cur,machineryBookings:(cur.machineryBookings||[]).map(b=>b.id===id?{...b,[field]:value}:b)})); }
-  function removeMachineryBooking(id){ setForm(cur=>({...cur,machineryBookings:(cur.machineryBookings||[]).filter(b=>b.id!==id)})); }
+  function addMachineryBooking(){ machineryTouchedRef.current = true; setForm(cur=>({...cur,machineryBookings:[...(cur.machineryBookings||[]),{id:createId(),machineId:"",workerId:"",startDate:cur.startDate||getIsoDate(new Date()),endDate:cur.endDate||cur.startDate||getIsoDate(new Date()),period:"full_day",bookingType:"job",description:""}]})); }
+  function updateMachineryBooking(id, field, value){ machineryTouchedRef.current = true; setForm(cur=>({...cur,machineryBookings:(cur.machineryBookings||[]).map(b=>b.id===id?{...b,[field]:value}:b)})); }
+  function removeMachineryBooking(id){ machineryTouchedRef.current = true; setForm(cur=>({...cur,machineryBookings:(cur.machineryBookings||[]).filter(b=>b.id!==id)})); }
   function machineryConflict(row){ return findMachineryConflict(row, machineryBookings.filter(b=>b.jobId!==form.id)); }
   function addSafetyPermit(name){
     if(!name || getSafetyPermits(form).some(p=>p.name===name)) return;
@@ -2071,7 +2290,7 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
       setSmsSending(false);
     }
   }
-  function submit(e){ e.preventDefault(); if(!form.title.trim()){setActiveTab("details"); alert("Please enter a job title."); return;} const rows=form.machineryBookings||[]; for(const row of rows){ if(!row.machineId||!row.workerId||!row.startDate||!row.endDate){setActiveTab("scheduling");alert("Complete all machinery booking fields or remove the incomplete row.");return;} const machine=machines.find(m=>m.id===row.machineId); if(machine?.status==="out_of_service"){setActiveTab("scheduling");alert(`${machineDisplayName(machine)} is out of service and cannot be booked.`);return;} if(machineryConflict(row)){setActiveTab("scheduling");alert("A machinery booking conflicts with an existing booking.");return;} const duplicate=rows.find(other=>other.id!==row.id&&findMachineryConflict(row,[other])); if(duplicate){setActiveTab("scheduling");alert("Two machinery bookings on this job overlap for the same machine.");return;} } onSave(form); }
+  function submit(e){ e.preventDefault(); if(!form.title.trim()){setActiveTab("details"); alert("Please enter a job title."); return;} const rows=form.machineryBookings||[]; for(const row of rows){ if(!row.machineId||!row.workerId||!row.startDate||!row.endDate){setActiveTab("scheduling");alert("Complete all machinery booking fields or remove the incomplete row.");return;} const machine=machines.find(m=>m.id===row.machineId); const storedBooking=machineryBookings.find(existing=>existing.id===row.id); const reservationUnchanged=Boolean(storedBooking&&storedBooking.machineId===row.machineId&&storedBooking.startDate===row.startDate&&(storedBooking.endDate||storedBooking.startDate)===(row.endDate||row.startDate)&&(storedBooking.period||"full_day")===(row.period||"full_day")); if(isMachineUnavailable(machine)&&!reservationUnchanged){setActiveTab("scheduling");alert(`${machineDisplayName(machine)} is unavailable and cannot be booked.`);return;} if(machineryConflict(row)){setActiveTab("scheduling");alert("A machinery booking conflicts with an existing booking.");return;} const duplicate=rows.find(other=>other.id!==row.id&&findMachineryConflict(row,[other])); if(duplicate){setActiveTab("scheduling");alert("Two machinery bookings on this job overlap for the same machine.");return;} } onSave(form); }
   return <div className="modal-backdrop"><form className="modal job-modal-tabs" onSubmit={submit}><div className="modal-header clean-modal-header"><div><h2>{job.title?"Edit job":"New job"}</h2><p>{form.jobNumber||form.workOrderNumber||form.poNumber||"Job details"}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><div className="job-tab-bar">{tabs.map(t=><button type="button" key={t} className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)}>{labelTab(t)}</button>)}</div>
   {activeTab==="details"&&<section className="job-tab-panel"><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div>{isAdmin && <label>Job value excluding GST ($)<input type="number" min="0" step="0.01" value={form.jobValue ?? ""} onChange={e=>update("jobValue", e.target.value === "" ? "" : Number(e.target.value))}/></label>}<label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label></section>}
   {activeTab==="scheduling"&&<section className="job-tab-panel">
@@ -2082,7 +2301,7 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
     <SafetyPermitPicker permits={getSafetyPermits(form)} onAdd={addSafetyPermit} onToggle={updateSafetyPermit} onRemove={removeSafetyPermit} />
     <div className="worker-picker"><strong>Assigned workers for the main booking dates</strong><p className="muted">The main booking uses the start and end dates on the Details tab.</p><div className="worker-options">{teamMembers.map(m=><label key={m.id} className="check-option"><input type="checkbox" checked={form.assignedTo.includes(m.id)} onChange={()=>toggleWorker(m.id)}/>{m.name}</label>)}</div></div>
     <section className="schedule-blocks-panel"><div className="card-top"><div><strong>Additional booking days / employees</strong><p className="muted">Use this for non-consecutive days, return visits, or different employees on different dates.</p></div><button type="button" className="secondary" onClick={addScheduleBlock}><Plus size={15}/> Add booking</button></div>{(form.scheduleBlocks||[]).map(block=><div className="schedule-block-row" key={block.id}><label>Employee<select value={block.workerId||""} onChange={e=>updateScheduleBlock(block.id,"workerId",e.target.value)}><option value="">Select employee</option>{teamMembers.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label><label>Start<input type="date" value={block.startDate||""} onChange={e=>updateScheduleBlock(block.id,"startDate",e.target.value)}/></label><label>End<input type="date" value={block.endDate||""} onChange={e=>updateScheduleBlock(block.id,"endDate",e.target.value)}/></label><button type="button" className="icon" onClick={()=>removeScheduleBlock(block.id)}><X size={15}/></button></div>)}{!(form.scheduleBlocks||[]).length&&<p className="muted">No additional booking rows added.</p>}</section>
-    {isAdmin && <section className="schedule-blocks-panel machinery-job-panel"><div className="card-top"><div><strong>Machinery bookings</strong><p className="muted">Book one or more machines for all or part of this job.</p></div><button type="button" className="secondary" onClick={addMachineryBooking}><Tractor size={15}/> Add machinery</button></div>{(form.machineryBookings||[]).map(row=>{const conflict=machineryConflict(row);return <div className={`machinery-booking-row ${conflict?"has-conflict":""}`} key={row.id}><label>Machine<select value={row.machineId||""} onChange={e=>updateMachineryBooking(row.id,"machineId",e.target.value)}><option value="">Select machine</option>{machines.filter(m=>m.status!=="out_of_service"&&m.active!==false).map(m=><option key={m.id} value={m.id}>{machineDisplayName(m)}</option>)}</select></label><label>Employee<select value={row.workerId||""} onChange={e=>updateMachineryBooking(row.id,"workerId",e.target.value)}><option value="">Select employee</option>{teamMembers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label>Start<input type="date" value={row.startDate||""} onChange={e=>updateMachineryBooking(row.id,"startDate",e.target.value)}/></label><label>End<input type="date" value={row.endDate||""} onChange={e=>updateMachineryBooking(row.id,"endDate",e.target.value)}/></label><label>Period<select value={row.period||"full_day"} onChange={e=>updateMachineryBooking(row.id,"period",e.target.value)}><option value="am">AM</option><option value="pm">PM</option><option value="full_day">Full day</option></select></label><button type="button" className="icon" onClick={()=>removeMachineryBooking(row.id)}><X size={15}/></button>{conflict&&<span className="booking-conflict">Unavailable: {conflict.description||conflict.jobTitle||"existing booking"}</span>}</div>})}{!(form.machineryBookings||[]).length&&<p className="muted">No machinery booked.</p>}</section>}
+    {isAdmin && <section className="schedule-blocks-panel machinery-job-panel"><div className="card-top"><div><strong>Machinery bookings</strong><p className="muted">Book one or more machines for all or part of this job.</p></div><button type="button" className="secondary" onClick={addMachineryBooking}><Tractor size={15}/> Add machinery</button></div>{(form.machineryBookings||[]).map(row=>{const conflict=machineryConflict(row);return <div className={`machinery-booking-row ${conflict?"has-conflict":""}`} key={row.id}><label>Machine<select value={row.machineId||""} onChange={e=>updateMachineryBooking(row.id,"machineId",e.target.value)}><option value="">Select machine</option>{machines.filter(m=>!isMachineUnavailable(m)||m.id===row.machineId).map(m=><option key={m.id} value={m.id} disabled={isMachineUnavailable(m)&&m.id!==row.machineId}>{machineDisplayName(m)}{isMachineUnavailable(m)?" — Unavailable":""}</option>)}</select></label><label>Employee<select value={row.workerId||""} onChange={e=>updateMachineryBooking(row.id,"workerId",e.target.value)}><option value="">Select employee</option>{teamMembers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label>Start<input type="date" value={row.startDate||""} onChange={e=>updateMachineryBooking(row.id,"startDate",e.target.value)}/></label><label>End<input type="date" value={row.endDate||""} onChange={e=>updateMachineryBooking(row.id,"endDate",e.target.value)}/></label><label>Period<select value={row.period||"full_day"} onChange={e=>updateMachineryBooking(row.id,"period",e.target.value)}><option value="am">AM</option><option value="pm">PM</option><option value="full_day">Full day</option></select></label><button type="button" className="icon" onClick={()=>removeMachineryBooking(row.id)}><X size={15}/></button>{conflict&&<span className="booking-conflict">Unavailable: {conflict.description||conflict.jobTitle||"existing booking"}</span>}</div>})}{!(form.machineryBookings||[]).length&&<p className="muted">No machinery booked.</p>}</section>}
   </section>}
   {activeTab==="client"&&<section className="job-tab-panel"><div className="two-col"><label>Client contact<input value={form.clientContact||""} onChange={e=>update("clientContact",e.target.value)}/></label><label>Client phone<input value={form.clientPhone||""} onChange={e=>update("clientPhone",e.target.value)} placeholder="e.g. 04xx xxx xxx or +61..."/></label></div><div className="appointment-panel stacked"><label className="check-option plain"><input type="checkbox" checked={!!form.appointmentSent} onChange={e=>update("appointmentSent",e.target.checked)}/>Appointment SMS sent</label><label className="check-option plain"><input type="checkbox" checked={!!form.clientAccepted} onChange={e=>update("clientAccepted",e.target.checked)}/>Client accepted appointment</label><div className="message-template-actions"><button type="button" className="secondary" onClick={()=>setMessageText(buildScheduleMessage(form))}>Scheduling message</button><button type="button" className="secondary" onClick={()=>setMessageText(buildRescheduleMessage(form))}>Reschedule message</button></div><label className="full-width-label">SMS message text<textarea rows="5" value={messageText} onChange={e=>setMessageText(e.target.value)}/></label><button type="button" className={smsStatus === "SMS sent and saved" ? "secondary success-button" : "secondary"} disabled={smsSending} onClick={handleSendClientMessage}><MessageSquare size={16}/> {smsSending ? "Sending..." : smsStatus === "SMS sent and saved" ? "SMS sent" : "Send SMS"}</button>{smsStatus && <span className={smsStatus === "SMS sent and saved" ? "success-text" : "error-text"}>{smsStatus}</span>}<a className="secondary" href={form.clientPhone?`tel:${form.clientPhone}`:undefined} onClick={(e)=>{if(!form.clientPhone){e.preventDefault(); alert("Enter a client phone number first.")}}}><Phone size={16}/> Call client</a></div><section className="message-history-panel"><div className="card-top"><div><strong>SMS history</strong><p className="muted">Sent and received messages linked to this job.</p></div></div><div className="message-list compact">{jobMessages.map(m=><article key={m.id} className={m.unread&&!m.actioned?"message-card unread":"message-card"}><div><strong>{m.direction==="in"?"Received":"Sent"}: {m.direction==="in"?(m.from||m.phoneNumber||"Client"):(m.to||m.phoneNumber||"Client")}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text||"(No message text)"}</p>{m.actioned&&m.actionedAt&&<em>Actioned {m.actionedBy?`by ${m.actionedBy} `:""}on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&m.direction==="in"&&<ReplyAction message={m} onReply={onReplyMessage || onActionMessage} />}</article>)}{!jobMessages.length&&<div className="empty small">No SMS messages linked to this job yet.</div>}</div></section></section>}
   {activeTab==="notes"&&<section className="job-tab-panel"><div className="note-entry note-entry-stacked"><textarea rows="3" value={noteInput} onChange={e=>setNoteInput(e.target.value)} placeholder="Add note history entry..."/><label className="inline-check"><input type="checkbox" checked={showNoteInTradeView} onChange={e=>setShowNoteInTradeView(e.target.checked)}/>Show note in Trade View</label><button type="button" className="secondary" onClick={addNote}>Add note</button></div><HistoryList items={form.noteHistory||[]} type="notes" onToggleTrade={(id,value)=>setForm(cur=>({...cur,noteHistory:(cur.noteHistory||[]).map(n=>n.id===id?{...n,showInTradeView:value}:n)}))}/></section>}
@@ -2142,19 +2361,19 @@ function CalendarItemModal({ context, onClose, onSave }) {
 
 
 
-function MachineryView({ machines, bookings, jobs, workers, days, selectedMachineId, setSelectedMachineId, onAddBooking, onEditBooking }) {
-  const activeMachines = machines.filter(m=>m.active!==false);
+function MachineryView({ machines, bookings, jobs, workers, days, selectedMachineId, setSelectedMachineId, onAddBooking, onEditBooking, onRefresh }) {
+  const activeMachines = machines.filter(m=>m.active!==false && m.status!=="inactive");
   return <main className="workspace machinery-workspace">
-    <aside className="machinery-list-panel"><div className="bucket-title"><Tractor size={18}/><div><h2>Machinery</h2><span>{activeMachines.length} assets</span></div></div><div className="machine-list">{activeMachines.map(machine=><button key={machine.id} className={selectedMachineId===machine.id?"machine-list-item active":"machine-list-item"} onClick={()=>setSelectedMachineId(machine.id)}><strong>{machineDisplayName(machine)}</strong><span>{machine.registration||"No registration"}</span>{machine.status==="out_of_service"&&<em>Out of service</em>}</button>)}{!activeMachines.length&&<div className="empty small">Add machinery in Settings.</div>}</div></aside>
-    <section className="calendar-area"><div className="machinery-toolbar"><div><strong>Machinery calendar</strong><span>AM, PM and full-day availability</span></div><button className="primary" onClick={()=>onAddBooking({machineId:selectedMachineId,date:getIsoDate(new Date())})}><Plus size={15}/> Ad hoc booking</button></div><MachineryCalendar machines={selectedMachineId?activeMachines.filter(m=>m.id===selectedMachineId):activeMachines} bookings={bookings} jobs={jobs} workers={workers} days={days} onAddBooking={onAddBooking} onEditBooking={onEditBooking}/></section>
+    <aside className="machinery-list-panel"><div className="bucket-title"><Tractor size={18}/><div><h2>Machinery</h2><span>{activeMachines.length} assets</span></div></div><div className="machine-list">{activeMachines.map(machine=><button key={machine.id} className={selectedMachineId===machine.id?"machine-list-item active":"machine-list-item"} onClick={()=>setSelectedMachineId(machine.id)}><strong>{machineDisplayName(machine)}</strong><span>{machine.registration||"No registration"}</span>{isMachineUnavailable(machine)&&<em>{machine.status==="inactive"?"Inactive":"Out of service"}</em>}</button>)}{!activeMachines.length&&<div className="empty small">Add machinery in Settings.</div>}</div></aside>
+    <section className="calendar-area"><div className="machinery-toolbar"><div><strong>Machinery calendar</strong><span>AM, PM and full-day availability</span></div><div className="machinery-toolbar-actions"><button className="secondary" type="button" onClick={onRefresh}><RotateCcw size={15}/> Refresh</button><button className="primary" type="button" onClick={()=>onAddBooking({machineId:selectedMachineId,date:getIsoDate(new Date())})}><Plus size={15}/> Ad hoc booking</button></div></div><MachineryCalendar machines={selectedMachineId?activeMachines.filter(m=>m.id===selectedMachineId):activeMachines} bookings={bookings} jobs={jobs} workers={workers} days={days} onAddBooking={onAddBooking} onEditBooking={onEditBooking}/></section>
   </main>;
 }
 
 function MachineryCalendar({ machines, bookings, jobs, workers, days, onAddBooking, onEditBooking }) {
-  return <div className="calendar-wrap machinery-calendar-wrap"><div className="machinery-calendar-grid" style={{"--day-count":days.length}}><div className="corner-cell">Machine</div>{days.map(day=><div key={getIsoDate(day)} className={`day-header ${isToday(day)?"today":""}`}><strong>{formatDayName(day)}</strong><span>{formatDateHeader(day)}</span></div>)}{machines.map(machine=><React.Fragment key={machine.id}><div className={`worker-cell machine-cell ${machine.status==="out_of_service"?"out-of-service":""}`}><strong>{machineDisplayName(machine)}</strong><span>{machine.registration||machine.baseLocation||""}</span>{machine.status==="out_of_service"&&<em>Out of service</em>}</div>{days.map(day=>{const date=getIsoDate(day);const dayBookings=bookings.filter(b=>b.machineId===machine.id&&isDateWithinRange(date,b.startDate,b.endDate));return <div key={`${machine.id}-${date}`} className={`machinery-day-cell ${machine.status==="out_of_service"?"blocked":""}`}><div className="machinery-period am"><span>AM</span>{renderMachinerySlot(machine,date,"am",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div><div className="machinery-period pm"><span>PM</span>{renderMachinerySlot(machine,date,"pm",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div></div>})}</React.Fragment>)}</div></div>;
+  return <div className="calendar-wrap machinery-calendar-wrap"><div className="machinery-calendar-grid" style={{"--day-count":days.length}}><div className="corner-cell">Machine</div>{days.map(day=><div key={getIsoDate(day)} className={`day-header ${isToday(day)?"today":""}`}><strong>{formatDayName(day)}</strong><span>{formatDateHeader(day)}</span></div>)}{machines.map(machine=><React.Fragment key={machine.id}><div className={`worker-cell machine-cell ${isMachineUnavailable(machine)?"out-of-service":""}`}><strong>{machineDisplayName(machine)}</strong><span>{machine.registration||machine.baseLocation||""}</span>{isMachineUnavailable(machine)&&<em>{machine.status==="inactive"?"Inactive":"Out of service"}</em>}</div>{days.map(day=>{const date=getIsoDate(day);const dayBookings=bookings.filter(b=>b.machineId===machine.id&&isDateWithinRange(date,b.startDate,b.endDate));return <div key={`${machine.id}-${date}`} className={`machinery-day-cell ${isMachineUnavailable(machine)?"blocked":""}`}><div className="machinery-period am"><span>AM</span>{renderMachinerySlot(machine,date,"am",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div><div className="machinery-period pm"><span>PM</span>{renderMachinerySlot(machine,date,"pm",dayBookings,jobs,workers,onAddBooking,onEditBooking)}</div></div>})}</React.Fragment>)}</div></div>;
 }
 function renderMachinerySlot(machine,date,period,dayBookings,jobs,workers,onAddBooking,onEditBooking){
-  if(machine.status==="out_of_service") return <span className="machine-blocked-label">Unavailable</span>;
+  if(isMachineUnavailable(machine)) return <span className="machine-blocked-label">Unavailable</span>;
   const booking=dayBookings.find(b=>b.period==="full_day"||b.period===period);
   if(!booking) return <button className="machine-slot-add" onClick={()=>onAddBooking({machineId:machine.id,date,period})}>+</button>;
   const job=jobs.find(j=>j.id===booking.jobId);const worker=workers.find(w=>w.id===booking.workerId);
@@ -2163,6 +2382,7 @@ function renderMachinerySlot(machine,date,period,dayBookings,jobs,workers,onAddB
 
 function MachinerySettingsModal({ machines, onClose, onSave }){
  const [items,setItems]=useState(machines.length?machines:[]);
+ useEffect(()=>{ if(!items.length&&machines.length) setItems(machines); },[machines,items.length]);
  function add(){setItems(cur=>[{id:createId(),machineType:"",assetNumber:"",registration:"",baseLocation:"",notes:"",status:"available",active:true},...cur]);}
  function update(id,field,value){setItems(cur=>cur.map(m=>m.id===id?{...m,[field]:value}:m));}
  return <div className="modal-backdrop"><div className="modal machinery-settings-modal"><div className="modal-header"><div><h2>Manage machinery</h2><p>Add assets and control availability.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div><button className="primary" onClick={add}><Plus size={15}/> Add machine</button><div className="machinery-settings-list">{items.map(m=><section key={m.id} className="machine-settings-card"><div className="two-col"><label>Machine type<input value={m.machineType||""} onChange={e=>update(m.id,"machineType",e.target.value)} placeholder="e.g. Kubota 1.7t"/></label><label>Asset number<input value={m.assetNumber||""} onChange={e=>update(m.id,"assetNumber",e.target.value)}/></label></div><div className="two-col"><label>Registration<input value={m.registration||""} onChange={e=>update(m.id,"registration",e.target.value)}/></label><label>Base location<input value={m.baseLocation||""} onChange={e=>update(m.id,"baseLocation",e.target.value)}/></label></div><label>Status<select value={m.status||"available"} onChange={e=>update(m.id,"status",e.target.value)}><option value="available">Available</option><option value="out_of_service">Out of service</option><option value="inactive">Inactive</option></select></label><label>Notes<textarea rows="2" value={m.notes||""} onChange={e=>update(m.id,"notes",e.target.value)}/></label><label className="inline-check"><input type="checkbox" checked={m.active!==false} onChange={e=>update(m.id,"active",e.target.checked)}/>Show in machinery calendar</label></section>)}{!items.length&&<div className="empty">No machinery added.</div>}</div><div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" onClick={()=>onSave(items)}>Save machinery</button></div></div></div>;
@@ -2174,8 +2394,8 @@ function MachineryBookingModal({ context, machines, bookings, jobs, workers, onC
  function update(field,value){setForm(cur=>({...cur,[field]:value}));}
  const conflict=findMachineryConflict(form,bookings.filter(b=>b.id!==form.id));
  const machine=machines.find(m=>m.id===form.machineId);
- async function submit(e){e.preventDefault();if(!form.machineId||!form.startDate||!form.endDate){alert("Select a machine and dates.");return;}if(machine?.status==="out_of_service"){alert("This machine is out of service and cannot be booked.");return;}if(conflict){alert("This machine is already booked for the selected period.");return;}if(form.bookingType!=="job"&&!form.description.trim()){alert("Enter a booking description.");return;}await onSave(form);}
- return <div className="modal-backdrop"><form className="modal machinery-booking-modal" onSubmit={submit}><div className="modal-header"><div><h2>{existing?"Edit machinery booking":"New machinery booking"}</h2><p>AM, PM or full-day booking.</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><label>Machine<select value={form.machineId} onChange={e=>update("machineId",e.target.value)}><option value="">Select machine</option>{machines.filter(m=>m.active!==false).map(m=><option key={m.id} value={m.id} disabled={m.status==="out_of_service"}>{machineDisplayName(m)}{m.status==="out_of_service"?" — Out of service":""}</option>)}</select></label><div className="two-col"><label>Booking type<select value={form.bookingType} onChange={e=>update("bookingType",e.target.value)}><option value="ad_hoc">Ad hoc</option><option value="maintenance">Maintenance</option><option value="repairs">Repairs</option><option value="job">Job</option></select></label><label>Employee<select value={form.workerId||""} onChange={e=>update("workerId",e.target.value)}><option value="">Unassigned</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label></div>{form.bookingType==="job"?<label>Job<select value={form.jobId||""} onChange={e=>update("jobId",e.target.value)}><option value="">Select job</option>{jobs.filter(j=>j.category!=="Cancelled").map(j=><option key={j.id} value={j.id}>{j.title}</option>)}</select></label>:<label>Description<textarea rows="3" value={form.description||""} onChange={e=>update("description",e.target.value)} placeholder="Enter maintenance, repairs or ad hoc details"/></label>}<div className="two-col"><label>Start<input type="date" value={form.startDate} onChange={e=>update("startDate",e.target.value)}/></label><label>End<input type="date" value={form.endDate} onChange={e=>update("endDate",e.target.value)}/></label></div><label>Period<select value={form.period} onChange={e=>update("period",e.target.value)}><option value="am">AM</option><option value="pm">PM</option><option value="full_day">Full day</option></select></label>{existing&&<div className="booking-audit-summary"><strong>Booking history</strong><span>Created: {formatDateTime(form.createdAt)}</span><span>Last updated: {formatDateTime(form.updatedAt)}</span></div>}{conflict&&<div className="defect-warning"><strong>Booking conflict</strong><span>This machine is already booked during the selected period.</span></div>}<div className="modal-actions">{existing&&<button type="button" className="danger" onClick={()=>onDelete(form.id)}>Delete</button>}<button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary">Save booking</button></div></form></div>;
+ async function submit(e){e.preventDefault();if(!form.machineId||!form.startDate||!form.endDate){alert("Select a machine and dates.");return;}if(isMachineUnavailable(machine)){alert("This machine is unavailable and cannot be booked.");return;}if(conflict){alert("This machine is already booked for the selected period.");return;}if(form.bookingType!=="job"&&!form.description.trim()){alert("Enter a booking description.");return;}await onSave(form);}
+ return <div className="modal-backdrop"><form className="modal machinery-booking-modal" onSubmit={submit}><div className="modal-header"><div><h2>{existing?"Edit machinery booking":"New machinery booking"}</h2><p>AM, PM or full-day booking.</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><label>Machine<select value={form.machineId} onChange={e=>update("machineId",e.target.value)}><option value="">Select machine</option>{machines.filter(m=>m.active!==false && m.status!=="inactive").map(m=><option key={m.id} value={m.id} disabled={isMachineUnavailable(m)}>{machineDisplayName(m)}{isMachineUnavailable(m)?" — Unavailable":""}</option>)}</select></label><div className="two-col"><label>Booking type<select value={form.bookingType} onChange={e=>update("bookingType",e.target.value)}><option value="ad_hoc">Ad hoc</option><option value="maintenance">Maintenance</option><option value="repairs">Repairs</option><option value="job">Job</option></select></label><label>Employee<select value={form.workerId||""} onChange={e=>update("workerId",e.target.value)}><option value="">Unassigned</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label></div>{form.bookingType==="job"?<label>Job<select value={form.jobId||""} onChange={e=>update("jobId",e.target.value)}><option value="">Select job</option>{jobs.filter(j=>j.category!=="Cancelled").map(j=><option key={j.id} value={j.id}>{j.title}</option>)}</select></label>:<label>Description<textarea rows="3" value={form.description||""} onChange={e=>update("description",e.target.value)} placeholder="Enter maintenance, repairs or ad hoc details"/></label>}<div className="two-col"><label>Start<input type="date" value={form.startDate} onChange={e=>update("startDate",e.target.value)}/></label><label>End<input type="date" value={form.endDate} onChange={e=>update("endDate",e.target.value)}/></label></div><label>Period<select value={form.period} onChange={e=>update("period",e.target.value)}><option value="am">AM</option><option value="pm">PM</option><option value="full_day">Full day</option></select></label>{existing&&<div className="booking-audit-summary"><strong>Booking history</strong><span>Created: {formatDateTime(form.createdAt)}</span><span>Last updated: {formatDateTime(form.updatedAt)}</span></div>}{conflict&&<div className="defect-warning"><strong>Booking conflict</strong><span>This machine is already booked during the selected period.</span></div>}<div className="modal-actions">{existing&&<button type="button" className="danger" onClick={()=>onDelete(form.id)}>Delete</button>}<button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary">Save booking</button></div></form></div>;
 }
 
 function ReportsModal({ jobs, workers, onClose }) {
@@ -2191,14 +2411,15 @@ function ReportsModal({ jobs, workers, onClose }) {
     if (reportType === "completed" && !completed) return false;
     if (reportType === "active" && (completed || job.category === "Cancelled")) return false;
     if (client !== "All" && job.client !== client) return false;
-    const assigned = getAllAssignedWorkerIds(job);
-    if (workerId !== "All" && !assigned.includes(workerId)) return false;
+    const involvedWorkers = getAllLabourWorkerIds(job);
+    if (workerId !== "All" && !involvedWorkers.includes(workerId)) return false;
     const date = completed ? getJobCompletionDate(job) : (job.startDate || job.endDate || "");
     return (!startDate || !date || date.slice(0,10) >= startDate) && (!endDate || !date || date.slice(0,10) <= endDate);
   }).map(job => {
-    const workerIds = getAllAssignedWorkerIds(job);
-    const labourHours = workerIds.reduce((sum,id)=>sum + getWorkerTotalMs(job,id)/3600000,0);
-    const labourCost = workerIds.reduce((sum,id)=>{
+    const labourWorkerIds = getAllLabourWorkerIds(job);
+    const completedWorkerIds = getCompletedWorkerIds(job);
+    const labourHours = labourWorkerIds.reduce((sum,id)=>sum + getWorkerTotalMs(job,id)/3600000,0);
+    const labourCost = labourWorkerIds.reduce((sum,id)=>{
       const worker = workers.find(w=>w.id===id);
       return sum + (getWorkerTotalMs(job,id)/3600000) * (Number(worker?.internalHourlyCost)||0);
     },0);
@@ -2212,7 +2433,7 @@ function ReportsModal({ jobs, workers, onClose }) {
       "Client": job.client,
       "Address": job.address,
       "Status": job.category,
-      "Completed by": workerIds.map(id=>getWorkerName(workers,id)).join(", "),
+      "Completed by": completedWorkerIds.map(id=>getWorkerName(workers,id)).join(", "),
       "Completion time": getJobCompletionDate(job) ? formatDateTime(getJobCompletionDate(job)) : "",
       "Labour hours": Number(labourHours.toFixed(2)),
       "Job value ex GST": value,
@@ -2230,8 +2451,70 @@ function ReportsModal({ jobs, workers, onClose }) {
   </div></div>;
 }
 
+function hasCurrentVisitActivity(job){
+  const workerIds = new Set([
+    ...getAllAssignedWorkerIds(job),
+    ...Object.keys(job.workerStatus || {}),
+    ...Object.keys(job.workerCompletions || {})
+  ]);
+  return [...workerIds].some(workerId =>
+    getCurrentWorkerTotalMs(job, workerId) > 0 ||
+    (job.workerStatus?.[workerId]?.status && job.workerStatus[workerId].status !== "notStarted") ||
+    Boolean(job.workerCompletions?.[workerId])
+  );
+}
+
+function appendCurrentVisitSnapshot(job, reason = "rescheduled", archivedAt = new Date().toISOString()){
+  const workerIds = Array.from(new Set([
+    ...getAllAssignedWorkerIds(job),
+    ...Object.keys(job.workerStatus || {}),
+    ...Object.keys(job.workerCompletions || {})
+  ])).filter(Boolean);
+  const hasSnapshotContent = jobHasAnyBooking(job) || hasCurrentVisitActivity(job);
+  if (!hasSnapshotContent) return job.priorVisits || [];
+  const snapshot = {
+    id: createId(),
+    archivedAt,
+    reason,
+    visitId: getCurrentVisitId(job) || null,
+    startDate: job.startDate || "",
+    endDate: job.endDate || job.startDate || "",
+    assignedTo: workerIds,
+    scheduleBlocks: structuredCloneSafe(job.scheduleBlocks || []),
+    workerStatus: structuredCloneSafe(job.workerStatus || {}),
+    workerCompletions: structuredCloneSafe(job.workerCompletions || {}),
+    completedConfirmed: Boolean(job.completedConfirmed || job.category === "Completed")
+  };
+  return [...(job.priorVisits || []), snapshot];
+}
+
 function getAllAssignedWorkerIds(job){ return [...new Set([...(job.assignedTo||[]), ...(job.scheduleBlocks||[]).map(b=>b.workerId).filter(Boolean)])]; }
-function getJobCompletionDate(job){ const dates=Object.values(job.workerCompletions||{}).map(c=>c?.updatedAt).filter(Boolean).sort(); return dates.at(-1) || job.completedAt || ""; }
+function getAllLabourWorkerIds(job){
+  const ids = new Set([
+    ...getAllAssignedWorkerIds(job),
+    ...Object.keys(job.workerStatus || {}),
+    ...Object.keys(job.workerCompletions || {})
+  ]);
+  (job.priorVisits || []).forEach(visit => {
+    (visit.assignedTo || []).forEach(id => id && ids.add(id));
+    Object.keys(visit.workerStatus || {}).forEach(id => ids.add(id));
+    Object.keys(visit.workerCompletions || {}).forEach(id => ids.add(id));
+  });
+  return [...ids].filter(Boolean);
+}
+function getCompletedWorkerIds(job){
+  const ids = new Set(Object.keys(job.workerCompletions || {}));
+  (job.priorVisits || []).forEach(visit => Object.keys(visit.workerCompletions || {}).forEach(id => ids.add(id)));
+  return [...ids].filter(Boolean);
+}
+function getJobCompletionDate(job){
+  const dates = [
+    ...Object.values(job.workerCompletions || {}).map(c => c?.updatedAt),
+    job.completedAt,
+    ...(job.jobHistory || []).filter(item => item.action === "Completed").map(item => item.date)
+  ].filter(Boolean).sort();
+  return dates.at(-1) || "";
+}
 function formatMoney(value){ return new Intl.NumberFormat("en-AU",{style:"currency",currency:"AUD"}).format(Number(value)||0); }
 
 function SideNav({ unreadMessages, isAdmin, onCalendar, onShare, onMessages, onPeople, onReports, onTools, onSettings }) {
@@ -2273,7 +2556,7 @@ function ToolRegisterPage({ tools, history, workers, currentWorkerId, isAdmin, o
   const [busy,setBusy]=useState(false);
   const q=query.trim().toLowerCase();
   const visibleTools = tools.filter(tool => {
-    if (!isAdmin && tool.assignedWorkerId !== currentWorkerId && tool.status !== "available") return false;
+    if (!isAdmin && tool.status === "inactive") return false;
     return !q || [tool.description, tool.toolId, tool.serialNumber, tool.brandModel].join(" ").toLowerCase().includes(q);
   });
   const ownHistory = isAdmin ? history : history.filter(item=>item.workerId===currentWorkerId||item.fromWorkerId===currentWorkerId);
@@ -2316,7 +2599,8 @@ function ToolRegisterPage({ tools, history, workers, currentWorkerId, isAdmin, o
 }
 
 function ToolQuickActions({ tool, isAdmin, currentWorkerId, busy, onAct }) {
-  return <div className="tool-row-actions">{!isAdmin&&tool.status==="available"&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"sign_out",currentWorkerId)}>Sign out</button>}{tool.status==="signed_out"&&((isAdmin)||tool.assignedWorkerId===currentWorkerId)&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"return",tool.assignedWorkerId)}>Return</button>}{tool.status!=="out_of_service"&&tool.status!=="inactive"&&<button disabled={busy} className="mini-action danger" onClick={()=>{const reason=prompt("Describe the fault / reason");if(reason)onAct(tool,"out_of_service",tool.assignedWorkerId,reason)}}>Out of service</button>}{isAdmin&&tool.status==="out_of_service"&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"return_to_service",null,"Returned to service by admin")}>Return to service</button>}</div>;
+  const canReportOutOfService = isAdmin || tool.status === "available" || tool.assignedWorkerId === currentWorkerId;
+  return <div className="tool-row-actions">{!isAdmin&&tool.status==="available"&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"sign_out",currentWorkerId)}>Sign out</button>}{tool.status==="signed_out"&&((isAdmin)||tool.assignedWorkerId===currentWorkerId)&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"return",tool.assignedWorkerId)}>Return</button>}{canReportOutOfService&&tool.status!=="out_of_service"&&tool.status!=="inactive"&&<button disabled={busy} className="mini-action danger" onClick={()=>{const reason=prompt("Describe the fault / reason");if(reason)onAct(tool,"out_of_service",tool.assignedWorkerId||currentWorkerId,reason)}}>Out of service</button>}{isAdmin&&tool.status==="out_of_service"&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"return_to_service",null,"Returned to service by admin")}>Return to service</button>}</div>;
 }
 
 function ToolDetailModal({ tool, history, workers, isAdmin, busy, onClose, onSave, onDelete }) {
@@ -2398,6 +2682,14 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
   const [peopleTab, setPeopleTab] = useState("active");
   const [selectedId, setSelectedId] = useState(workers.find(w => !w.inactive)?.id || workers[0]?.id || "");
 
+  useEffect(() => {
+    if (!items.length && workers.length) {
+      const incoming = workers.map(worker => ({ inactive: false, accessRevoked: false, appRole: "employee", sendInvite: false, ...worker }));
+      setItems(incoming);
+      setSelectedId(incoming.find(worker => !worker.inactive)?.id || incoming[0]?.id || "");
+    }
+  }, [workers, items.length]);
+
   const activeCount = items.filter(w => !w.inactive).length;
   const archivedCount = items.filter(w => w.inactive).length;
   const filtered = items.filter(w => {
@@ -2448,7 +2740,7 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
 
   function permanentlyDelete(worker) {
     if (!worker) return;
-    const message = `Permanently delete ${worker.name || "this employee"}? This removes the worker record from Jobsched${usingSupabase ? " and the Supabase workers table" : ""}.`;
+    const message = `Permanently delete ${worker.name || "this employee"}? This removes the worker record from AIM CG${usingSupabase ? " and the Supabase workers table" : ""}.`;
     if (!confirm(message)) return;
     if (isUuid(worker.id)) setDeletedWorkerIds(current => current.includes(worker.id) ? current : [...current, worker.id]);
     setItems(current => current.filter(w => w.id !== worker.id));
@@ -2461,7 +2753,7 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
         <div className="modal-header">
           <div>
             <h2>People</h2>
-            <p>{usingSupabase ? "Connected to Supabase workers table." : "Local demo people mode."}</p>
+            <p>{usingSupabase ? "Connected to Supabase workers table." : "Supabase connection unavailable."}</p>
           </div>
           <button className="icon" onClick={onClose}><X size={18}/></button>
         </div>
@@ -2512,7 +2804,7 @@ function PeopleModal({ workers, usingSupabase, saving, onClose, onSave }) {
 
             <section className="access-panel">
               <strong>App access and permissions</strong>
-              <p>Admin has full read/write access. Employee uses the employee view and can read their calendar, add notes and operate job controls.</p>
+              <p>Admin has full read/write access. Trade users can read their assigned calendar, add notes and operate job controls.</p>
               <label>Permission level
                 <select value={selected.appRole || "employee"} onChange={e=>update(selected.id,"appRole",e.target.value)}>
                   <option value="employee">Employee — calendar read, notes and employee tab only</option>
@@ -2578,7 +2870,7 @@ function MessagesModal({ messages, jobs, onClose, onAction, onReply }) {
 }
 
 function HistoryModal({ job, onClose }) { return <div className="modal-backdrop"><div className="modal mini-modal"><div className="modal-header"><h2>Job history</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><HistoryList items={job.jobHistory||[]} type="history"/></div></div> }
-function HistoryList({ items, onToggleTrade }) { return <div className="history-list">{items.map(i=><div key={i.id}><strong>{i.action||i.user}</strong><span>{formatDateTime(i.date)} · {i.user}</span><p>{i.details||i.text}</p>{onToggleTrade && <label className="inline-check compact-check"><input type="checkbox" checked={Boolean(i.showInTradeView)} onChange={e=>onToggleTrade(i.id,e.target.checked)}/>Show in Trade View</label>}</div>)}{!items.length&&<p>No entries yet.</p>}</div> }
+function HistoryList({ items, onToggleTrade }) { return <div className="history-list">{items.map(i=>{const canShare=Boolean(onToggleTrade)&&!i.workerId&&!["completion","completion_follow_up","attachment_upload"].includes(i.noteType||"");return <div key={i.id}><strong>{i.action||i.user}</strong><span>{formatDateTime(i.date)} · {i.user}</span><p>{i.details||i.text}</p>{canShare&&<label className="inline-check compact-check"><input type="checkbox" checked={Boolean(i.showInTradeView)} onChange={e=>onToggleTrade(i.id,e.target.checked)}/>Show in Trade View</label>}</div>})}{!items.length&&<p>No entries yet.</p>}</div> }
 
 function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords, onStatus, onAddAttachment, onCompletion, canSwitchWorker = false, machines = [], machineryBookings = [] }) {
   const [range, setRange] = useState("today");
@@ -2590,6 +2882,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   const startIso = getIsoDate(days[0]);
   const endIso = getIsoDate(days[days.length - 1]);
   const visible = jobs.filter(j =>
+    j.category !== "Cancelled" &&
     getDatesInRange(startIso, endIso).some(d => jobOccursForWorkerOnDate(j, worker?.id || "", d))
   );
   const displayDays = range === "today" ? days.slice(0, 1) : range === "tomorrow" ? days.slice(1, 2) : days;
@@ -2648,14 +2941,14 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
     <main className="employee-view app-like-view">
       <section className="employee-app-header">
         <div>
-          <span className="app-kicker">Employee schedule</span>
+          <span className="app-kicker">Trade schedule</span>
           <h2>{worker?.name || "Employee"}</h2>
           <p>{worker?.trade || "No trade"} · {worker?.baseSite || "No site"}</p>
         </div>
         {canSwitchWorker ? (
           <label>View as<select value={worker?.id || ""} onChange={e => setWorkerId(e.target.value)}>{workers.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select></label>
         ) : (
-          <span className="employee-role-pill">Employee access only</span>
+          <span className="employee-role-pill">Trade access only</span>
         )}
       </section>
 
@@ -2792,7 +3085,9 @@ function buildWorkDoneSummary(job, workers = []) {
     lines.push("");
   });
 
-  const employeeNotes = (job.noteHistory || []).filter(note => note.user && note.user !== CURRENT_USER);
+  const employeeNotes = (job.noteHistory || []).filter(note =>
+    Boolean(note.workerId) || ["completion", "completion_follow_up"].includes(note.noteType)
+  );
   if (employeeNotes.length) {
     lines.push("Employee notes:");
     employeeNotes.forEach(note => lines.push(`${formatDateTime(note.date)} - ${note.user}: ${note.text}`));
@@ -2854,6 +3149,11 @@ function mapWorkerToSupabase(worker) {
     birthday: worker.birthday || null,
     roster_pattern: worker.rosterPattern || "NONE",
     roster_start_date: worker.rosterStartDate || null,
+    custom_work_start: worker.customWorkStart || null,
+    custom_work_end: worker.customWorkEnd || null,
+    custom_rnr_start: worker.customRnrStart || null,
+    custom_rnr_end: worker.customRnrEnd || null,
+    custom_repeat_until: worker.customRepeatUntil || null,
     inactive: Boolean(worker.inactive),
     access_revoked: Boolean(worker.accessRevoked),
     app_role: worker.appRole || "employee",
@@ -2923,16 +3223,28 @@ async function fetchWorkersFromSupabase() {
 
 async function saveWorkersToSupabase(workers) {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
-  for (const worker of workers) {
+  const sourceWorkers = workers || [];
+  const rows = sourceWorkers.map(worker => {
     const row = mapWorkerToSupabase(worker);
-    let result;
-    if (row.id) {
-      result = await supabase.from("workers").update(row).eq("id", row.id);
-    } else {
-      result = await supabase.from("workers").insert(row);
-    }
-    if (result.error) throw result.error;
-  }
+    // Allocate the UUID in the browser before the upsert so newly-created
+    // employees can immediately receive an hourly cost and invitation without
+    // waiting for a second database lookup.
+    if (!row.id) row.id = createId();
+    return row;
+  });
+  if (!rows.length) return [];
+  // One request avoids a partially updated employee register if a later row
+  // fails or the connection drops during a multi-row save.
+  const { data, error } = await supabase
+    .from("workers")
+    .upsert(rows, { onConflict: "id" })
+    .select("*");
+  if (error) throw error;
+  const savedById = new Map((data || []).map(row => [row.id, mapWorkerFromSupabase(row)]));
+  return rows.map((row, index) => ({
+    ...(savedById.get(row.id) || mapWorkerFromSupabase(row)),
+    internalHourlyCost: sourceWorkers[index]?.internalHourlyCost ?? ""
+  }));
 }
 
 async function deleteWorkersFromSupabase(workerIds) {
@@ -2961,6 +3273,7 @@ function mapJobFromSupabase(row, bookingRows = []) {
     (!payloadStart || b.start_date === payloadStart) &&
     (!payloadEnd || (b.end_date || b.start_date) === payloadEnd)
   );
+  const matchedPayloadPrimary = primaryBookings.length > 0;
 
   if (!primaryBookings.length && bookings.length) {
     const first = bookings[0];
@@ -2971,8 +3284,23 @@ function mapJobFromSupabase(row, bookingRows = []) {
   }
 
   const primaryIds = new Set(primaryBookings.map(b => b.id));
+  const primaryBookingIds = Object.fromEntries(
+    primaryBookings
+      .filter(booking => booking.worker_id && isUuid(booking.id))
+      .map(booking => [booking.worker_id, booking.id])
+  );
   const primary = primaryBookings[0] || bookings[0];
   const extra = bookings.filter(b => !primaryIds.has(b.id));
+  // A Trade login may only be allowed to read its own booking row. When that
+  // row is an additional/ad-hoc occurrence, the admin payload can still carry
+  // the original primary dates. Promote the visible booking to the effective
+  // occurrence so Trade View date filtering cannot hide a valid assignment.
+  const effectiveStartDate = matchedPayloadPrimary
+    ? (payloadStart || primary?.start_date || "")
+    : (primary?.start_date || payloadStart || "");
+  const effectiveEndDate = matchedPayloadPrimary
+    ? (payloadEnd || primary?.end_date || primary?.start_date || effectiveStartDate)
+    : (primary?.end_date || primary?.start_date || payloadEnd || effectiveStartDate);
   const bookingWorkerStatus = bookings.reduce((acc, booking) => {
     if (!booking.worker_id) return acc;
     const rawStatus = String(booking.booking_status || "notStarted").toLowerCase();
@@ -2981,7 +3309,7 @@ function mapJobFromSupabase(row, bookingRows = []) {
       : ["running", "stopped", "completed", "notstarted"].includes(rawStatus)
         ? (rawStatus === "notstarted" ? "notStarted" : rawStatus)
         : "notStarted";
-    acc[booking.worker_id] = {
+    const candidate = {
       ...(payload.workerStatus?.[booking.worker_id] || {}),
       status,
       totalMs: Number(booking.total_ms ?? payload.workerStatus?.[booking.worker_id]?.totalMs ?? 0) || 0,
@@ -2989,6 +3317,10 @@ function mapJobFromSupabase(row, bookingRows = []) {
       updatedAt: booking.status_updated_at || booking.updated_at || null,
       visitId: booking.visit_id || payload.workerStatus?.[booking.worker_id]?.visitId || null
     };
+    const existing = acc[booking.worker_id];
+    const existingTime = existing?.updatedAt ? new Date(existing.updatedAt).getTime() : 0;
+    const candidateTime = candidate.updatedAt ? new Date(candidate.updatedAt).getTime() : 0;
+    if (!existing || candidateTime >= existingTime) acc[booking.worker_id] = candidate;
     return acc;
   }, {});
   const itemType = row.item_type || payload.itemType || "normal_job";
@@ -3014,9 +3346,12 @@ function mapJobFromSupabase(row, bookingRows = []) {
     completedConfirmed: Boolean(row.completed_confirmed),
     isAdHoc: itemType === "ad_hoc" || Boolean(payload.isAdHoc),
     isTravelComment: itemType === "travel_accommodation" || Boolean(payload.isTravelComment),
+    // The machinery_bookings table is authoritative; ignore legacy copies in app_payload.
+    machineryBookings: [],
     assignedTo: primaryBookings.length ? primaryBookings.map(b => b.worker_id).filter(Boolean) : (primary?.worker_id ? [primary.worker_id] : payloadAssigned),
-    startDate: payloadStart || primary?.start_date || "",
-    endDate: payloadEnd || primary?.end_date || primary?.start_date || "",
+    primaryBookingIds,
+    startDate: effectiveStartDate,
+    endDate: effectiveEndDate,
     scheduleBlocks: extra.map(b => ({ id: b.id, workerId: b.worker_id || "", startDate: b.start_date || "", endDate: b.end_date || b.start_date || "" })).filter(b => b.workerId && b.startDate && b.endDate),
     ...normaliseDefectVisitState({
       payload,
@@ -3089,7 +3424,14 @@ function normaliseDefectVisitState({ payload, row, bookings, bookingWorkerStatus
 
 function mapJobToSupabase(job) {
   const itemType = job.isTravelComment ? "travel_accommodation" : job.isAdHoc ? "ad_hoc" : "normal_job";
-  const { jobValue: _privateJobValue, ...publicJob } = job;
+  // Notes are persisted in job_notes where per-note Trade View visibility is
+  // enforced by RLS. Do not duplicate them inside the jobs JSON payload.
+  const {
+    jobValue: _privateJobValue,
+    noteHistory: _privateNoteHistory,
+    machineryBookings: _separateMachineryBookings,
+    ...publicJob
+  } = job;
   const payload = {
     ...publicJob,
     id: job.id,
@@ -3122,8 +3464,12 @@ function mapJobToSupabase(job) {
 
 function getJobBookingsForSupabase(job) {
   const rows = [];
+  const seenBookingKeys = new Set();
   const addBookingRow = ({ id, workerId, startDate, endDate }) => {
     if (!isUuid(job.id) || !workerId || !startDate || !endDate) return;
+    const bookingKey = `${workerId}:${startDate}:${endDate}`;
+    if (seenBookingKeys.has(bookingKey)) return;
+    seenBookingKeys.add(bookingKey);
     const row = {
       job_id: job.id,
       worker_id: workerId,
@@ -3134,7 +3480,7 @@ function getJobBookingsForSupabase(job) {
       booking_status: getCurrentWorkerStatus(job, workerId) || "notStarted",
       total_ms: Math.max(0, Math.round(Number(job.workerStatus?.[workerId]?.totalMs) || 0)),
       running_since: job.workerStatus?.[workerId]?.runningSince ? new Date(Number(job.workerStatus[workerId].runningSince)).toISOString() : null,
-      status_updated_at: job.workerStatus?.[workerId]?.updatedAt || new Date().toISOString(),
+      status_updated_at: job.workerStatus?.[workerId]?.updatedAt || null,
       visit_id: job.workerStatus?.[workerId]?.visitId || getCurrentVisitId(job) || null
     };
 
@@ -3147,7 +3493,12 @@ function getJobBookingsForSupabase(job) {
 
   if (hasPrimaryBooking(job)) {
     (job.assignedTo || []).forEach(workerId => {
-      addBookingRow({ workerId, startDate: job.startDate, endDate: job.endDate });
+      addBookingRow({
+        id: job.primaryBookingIds?.[workerId],
+        workerId,
+        startDate: job.startDate,
+        endDate: job.endDate
+      });
     });
   }
 
@@ -3301,7 +3652,7 @@ function mapMessageFromSupabase(row = {}) {
     direction,
     rawDirection,
     channel: row.channel || "sms",
-    from: row.from_number || row.from || (direction === "in" ? "Client" : "Jobsched"),
+    from: row.from_number || row.from || (direction === "in" ? "Client" : "AIM CG"),
     to: row.to_number || row.to || "",
     phoneNumber: row.phone_number || row.phoneNumber || "",
     text: row.message_body || row.message_text || row.text || row.body || "",
@@ -3346,8 +3697,24 @@ async function fetchMachineryFromSupabase(){
  return (data||[]).map(r=>({id:r.id,machineType:r.machine_type||"",assetNumber:r.asset_number||"",registration:r.registration||"",baseLocation:r.base_location||"",notes:r.notes||"",status:r.status||"available",active:r.active!==false}));
 }
 async function saveMachineryToSupabase(items){
- if(!supabase) throw new Error("Supabase is not configured.");
- for(const m of items){const row={machine_type:m.machineType||"Unnamed machine",asset_number:m.assetNumber||null,registration:m.registration||null,base_location:m.baseLocation||null,notes:m.notes||null,status:m.status||"available",active:m.active!==false,updated_at:new Date().toISOString()};if(isUuid(m.id))row.id=m.id;const {error}=await supabase.from("machinery").upsert(row,{onConflict:"id"});if(error)throw error;}
+  if(!supabase) throw new Error("Supabase is not configured.");
+  const now = new Date().toISOString();
+  const rows = (items || []).map(machine => ({
+    id: isUuid(machine.id) ? machine.id : createId(),
+    machine_type: machine.machineType || "Unnamed machine",
+    asset_number: machine.assetNumber || null,
+    registration: machine.registration || null,
+    base_location: machine.baseLocation || null,
+    notes: machine.notes || null,
+    status: machine.status || "available",
+    active: machine.status === "inactive" ? false : machine.active !== false,
+    updated_at: now
+  }));
+  if (!rows.length) return;
+  // Save the register in one statement so a partial request cannot leave some
+  // machines updated and others stale.
+  const { error } = await supabase.from("machinery").upsert(rows,{onConflict:"id"});
+  if(error) throw error;
 }
 async function fetchMachineryBookingsFromSupabase(){
  if(!supabase) return [];
@@ -3356,18 +3723,50 @@ async function fetchMachineryBookingsFromSupabase(){
  return (data||[]).map(r=>({id:r.id,machineId:r.machine_id,jobId:r.job_id||"",workerId:r.worker_id||"",startDate:r.start_date,endDate:r.end_date||r.start_date,period:r.period||"full_day",bookingType:r.booking_type||"ad_hoc",description:r.description||"",createdBy:r.created_by||"",createdAt:r.created_at,updatedAt:r.updated_at}));
 }
 async function saveMachineryBookingToSupabase(b){
- if(!supabase)throw new Error("Supabase is not configured.");
- const row={machine_id:b.machineId,job_id:isUuid(b.jobId)?b.jobId:null,worker_id:isUuid(b.workerId)?b.workerId:null,start_date:b.startDate,end_date:b.endDate||b.startDate,period:b.period||"full_day",booking_type:b.bookingType||"ad_hoc",description:b.description||null,updated_at:new Date().toISOString()};if(isUuid(b.id))row.id=b.id;
- const others=(await fetchMachineryBookingsFromSupabase()).filter(x=>x.id!==b.id);if(findMachineryConflict(b,others))throw new Error("This machine is already booked for the selected period.");
- const {error}=await supabase.from("machinery_bookings").upsert(row,{onConflict:"id"});if(error)throw error;
+  if (!supabase) throw new Error("Supabase is not configured.");
+  const payload = {
+    ...(isUuid(b.id) ? { id: b.id } : {}),
+    machine_id: b.machineId,
+    job_id: isUuid(b.jobId) ? b.jobId : null,
+    worker_id: isUuid(b.workerId) ? b.workerId : null,
+    start_date: b.startDate,
+    end_date: b.endDate || b.startDate,
+    period: b.period || "full_day",
+    booking_type: b.bookingType || "ad_hoc",
+    description: b.description || null
+  };
+  const { error } = await supabase.rpc("aimcg_save_machinery_booking", { p_booking: payload });
+  if (error) {
+    const functionMissing = ["42883", "PGRST202", "PGRST205"].includes(error.code)
+      || /aimcg_save_machinery_booking|function.*not found/i.test(error.message || "");
+    if (functionMissing) {
+      throw new Error("Run SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql before saving machinery bookings.");
+    }
+    throw error;
+  }
 }
 async function deleteMachineryBookingFromSupabase(id){if(!supabase||!isUuid(id))return;const {error}=await supabase.from("machinery_bookings").delete().eq("id",id);if(error)throw error;}
 async function syncJobMachineryBookingsToSupabase(jobId,rows){
- if(!supabase||!isUuid(jobId))return;
- const {error:deleteError}=await supabase.from("machinery_bookings").delete().eq("job_id",jobId);if(deleteError)throw deleteError;
- for(const b of rows){if(!b.machineId||!b.startDate)continue;await saveMachineryBookingToSupabase({...b,id:isUuid(b.id)?b.id:createId(),jobId,bookingType:"job"});}
+  if(!supabase||!isUuid(jobId))return;
+  const payload=(rows||[]).filter(b=>b.machineId&&b.startDate).map(b=>({
+    id:isUuid(b.id)?b.id:createId(),
+    machine_id:b.machineId,
+    worker_id:isUuid(b.workerId)?b.workerId:null,
+    start_date:b.startDate,
+    end_date:b.endDate||b.startDate,
+    period:b.period||"full_day",
+    description:b.description||null
+  }));
+  const {error}=await supabase.rpc("aimcg_replace_job_machinery_bookings",{p_job_id:jobId,p_bookings:payload});
+  if(error){
+    const missing=["42883","PGRST202","PGRST205"].includes(error.code)||/aimcg_replace_job_machinery_bookings|function.*not found/i.test(error.message||"");
+    if(missing) throw new Error("Run SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql before saving job machinery bookings.");
+    throw error;
+  }
 }
+
 function machineDisplayName(m){return [m.machineType,m.assetNumber?`Asset ${m.assetNumber}`:""].filter(Boolean).join(" – ")||"Unnamed machine";}
+function isMachineUnavailable(machine){return !machine || machine.active===false || ["out_of_service","inactive"].includes(machine.status);}
 function bookingPeriodsOverlap(a,b){return a==="full_day"||b==="full_day"||a===b;}
 function findMachineryConflict(candidate,bookings){if(!candidate?.machineId||!candidate?.startDate)return null;return (bookings||[]).find(b=>b.machineId===candidate.machineId&&isDateRangesOverlap(candidate.startDate,candidate.endDate||candidate.startDate,b.startDate,b.endDate||b.startDate)&&bookingPeriodsOverlap(candidate.period||"full_day",b.period||"full_day"))||null;}
 function isDateRangesOverlap(aStart,aEnd,bStart,bEnd){return compareIsoDates(aStart,bEnd)<=0&&compareIsoDates(bStart,aEnd)<=0;}
@@ -3383,22 +3782,30 @@ async function fetchJobsFromSupabase() {
   let notesByJob = {};
   let historyByJob = {};
   let completionSubmissionsByJob = {};
+  let visitHistoryByJob = {};
   let workerNames = {};
   if (jobIds.length) {
-    const [attachmentResult, noteResult, historyResult, completionResult, workerResult] = await Promise.all([
+    const supplementalSettled = await Promise.allSettled([
       supabase.from("attachments").select("*").in("job_id", jobIds).order("created_at", { ascending: false }),
       supabase.from("job_notes").select("id,job_id,worker_id,note_text,note_type,visit_id,show_in_trade_view,created_by,created_at").in("job_id", jobIds).order("created_at", { ascending: false }),
       supabase.from("job_history").select("id,job_id,action,details,created_by,created_at").in("job_id", jobIds).order("created_at", { ascending: false }),
       supabase.from("job_completion_submissions").select("*").in("job_id", jobIds).order("submitted_at", { ascending: false }),
+      supabase.from("job_visit_history").select("*").in("job_id", jobIds).order("archived_at", { ascending: true }),
       supabase.from("workers").select("id,name")
     ]);
+    const supplementalNames = ["attachments", "job notes", "job history", "completion submissions", "visit history", "worker names"];
+    const supplementalResults = supplementalSettled.map((result, index) => {
+      if (result.status === "fulfilled") return result.value;
+      console.warn(`Could not load ${supplementalNames[index]}; core jobs/bookings will still be shown.`, result.reason);
+      return { data: [], error: result.reason };
+    });
+    const [attachmentResult, noteResult, historyResult, completionResult, visitResult, workerResult] = supplementalResults;
+    [attachmentResult, noteResult, historyResult, completionResult, visitResult, workerResult].forEach((result, index) => {
+      if (result?.error) console.warn(`Could not load ${supplementalNames[index]}; core jobs/bookings will still be shown.`, result.error);
+    });
 
-    if (attachmentResult.error && attachmentResult.error.code !== "42P01") throw attachmentResult.error;
-    if (noteResult.error && noteResult.error.code !== "42P01" && noteResult.error.code !== "42703") throw noteResult.error;
-    if (historyResult.error && historyResult.error.code !== "42P01") throw historyResult.error;
-    if (completionResult.error && completionResult.error.code !== "42P01") throw completionResult.error;
-    if (workerResult.error) throw workerResult.error;
-
+    // Supplemental tables must never prevent core jobs/bookings from loading.
+    // RLS may intentionally hide some enrichment rows from Trade View.
     workerNames = Object.fromEntries((workerResult.data || []).map(worker => [worker.id, worker.name || "Employee"]));
     attachmentsByJob = (attachmentResult.data || []).reduce((acc, row) => {
       const item = mapAttachmentFromSupabase(row);
@@ -3417,6 +3824,24 @@ async function fetchJobsFromSupabase() {
       acc[row.job_id] = [...(acc[row.job_id] || []), row];
       return acc;
     }, {});
+    visitHistoryByJob = (visitResult.data || []).reduce((acc, row) => {
+      const snapshot = row.snapshot && typeof row.snapshot === "object" ? row.snapshot : {};
+      const visit = {
+        id: snapshot.id || row.visit_key || row.id,
+        archivedAt: snapshot.archivedAt || row.archived_at || row.updated_at || new Date().toISOString(),
+        reason: snapshot.reason || row.visit_type || "rescheduled",
+        visitId: snapshot.visitId || null,
+        startDate: snapshot.startDate || row.start_date || "",
+        endDate: snapshot.endDate || row.end_date || row.start_date || "",
+        assignedTo: Array.isArray(snapshot.assignedTo) ? snapshot.assignedTo : (row.assigned_to || []),
+        scheduleBlocks: Array.isArray(snapshot.scheduleBlocks) ? snapshot.scheduleBlocks : [],
+        workerStatus: snapshot.workerStatus || row.worker_status || {},
+        workerCompletions: snapshot.workerCompletions || row.worker_completions || {},
+        completedConfirmed: snapshot.completedConfirmed ?? Boolean(row.completed_confirmed)
+      };
+      acc[row.job_id] = [...(acc[row.job_id] || []), visit];
+      return acc;
+    }, {});
   }
   return (jobRows || []).map(row => {
     let job = mapJobFromSupabase(row, bookingRows || []);
@@ -3424,19 +3849,30 @@ async function fetchJobsFromSupabase() {
     const remoteNotes = notesByJob[row.id] || [];
     const remoteHistory = historyByJob[row.id] || [];
     const completionSubmissions = completionSubmissionsByJob[row.id] || [];
+    const archivedVisits = visitHistoryByJob[row.id] || [];
     const currentVisitId = getCurrentVisitId(job);
     const currentVisitStartedAt = job.currentVisitStartedAt ? new Date(job.currentVisitStartedAt).getTime() : 0;
 
-    const noteHistory = remoteNotes.map(note => ({
-      id: note.id,
-      date: note.created_at || new Date().toISOString(),
-      user: workerNames[note.worker_id] || (note.worker_id ? "Employee" : "Admin"),
-      workerId: note.worker_id || "",
-      text: note.note_text || "",
-      noteType: note.note_type || "general",
-      visitId: note.visit_id || "",
-      showInTradeView: Boolean(note.show_in_trade_view)
-    }));
+    const completionLedgerKeys = new Set(
+      completionSubmissions
+        .filter(submission => submission.worker_id)
+        .map(submission => `${submission.worker_id}:${submission.visit_id || "original"}`)
+    );
+    const noteHistory = remoteNotes
+      .filter(note => {
+        if (!note.worker_id || !["completion", "completion_follow_up"].includes(note.note_type)) return true;
+        return !completionLedgerKeys.has(`${note.worker_id}:${note.visit_id || "original"}`);
+      })
+      .map(note => ({
+        id: note.id,
+        date: note.created_at || new Date().toISOString(),
+        user: workerNames[note.worker_id] || (note.worker_id ? "Employee" : "Admin"),
+        workerId: note.worker_id || "",
+        text: note.note_text || "",
+        noteType: note.note_type || "general",
+        visitId: note.visit_id || "",
+        showInTradeView: Boolean(note.show_in_trade_view)
+      }));
     const jobHistory = remoteHistory.map(item => ({
       id: item.id,
       date: item.created_at || new Date().toISOString(),
@@ -3515,6 +3951,7 @@ async function fetchJobsFromSupabase() {
       attachments: mergeAttachments(storedAttachments, job.attachments || []),
       noteHistory: mergeHistoryEntries([...completionNotes, ...noteHistory], job.noteHistory || []),
       jobHistory: mergeHistoryEntries(jobHistory, job.jobHistory || []),
+      priorVisits: mergeVisitEntries(archivedVisits, job.priorVisits || []),
       workerCompletions
     };
     return normaliseJob(job);
@@ -3532,18 +3969,79 @@ function mergeHistoryEntries(primary = [], secondary = []) {
   }).sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
 }
 
+function mergeVisitEntries(primary = [], secondary = []) {
+  const seen = new Set();
+  return [...primary, ...secondary]
+    .filter(visit => {
+      if (!visit) return false;
+      const key = visit.id || `${visit.archivedAt || ""}:${visit.startDate || ""}:${visit.endDate || ""}:${visit.reason || ""}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .sort((a, b) => new Date(a.archivedAt || 0) - new Date(b.archivedAt || 0));
+}
+
+function getAdminNotesForSupabase(job) {
+  return (job.noteHistory || [])
+    .filter(note => !note.workerId && !["completion", "completion_follow_up", "attachment_upload"].includes(note.noteType || "general"))
+    .filter(note => String(note.text || "").trim())
+    .map(note => ({
+      id: isUuid(note.id) ? note.id : createId(),
+      note_text: String(note.text || "").trim(),
+      note_type: note.noteType || "admin_note",
+      visit_id: note.visitId || null,
+      show_in_trade_view: Boolean(note.showInTradeView),
+      created_at: note.date || new Date().toISOString()
+    }));
+}
+
+function queuePersistJobToSupabase(job) {
+  const jobId = job?.id || "unknown-job";
+  const previous = jobPersistQueues.get(jobId) || Promise.resolve();
+  let queued;
+  queued = previous
+    .catch(() => undefined)
+    .then(() => persistJobToSupabase(job))
+    .finally(() => {
+      if (jobPersistQueues.get(jobId) === queued) jobPersistQueues.delete(jobId);
+    });
+  jobPersistQueues.set(jobId, queued);
+  return queued;
+}
+
 async function persistJobToSupabase(job) {
   if (!supabase) throw new Error("Supabase is not configured for this build.");
   const normalised = normaliseJob(job);
-  const { error: jobError } = await supabase.from("jobs").upsert(mapJobToSupabase(normalised), { onConflict: "id" });
-  if (jobError) throw jobError;
-  const { error: deleteError } = await supabase.from("job_bookings").delete().eq("job_id", normalised.id);
-  if (deleteError) throw deleteError;
+  const jobRow = mapJobToSupabase(normalised);
   const bookings = getJobBookingsForSupabase(normalised);
-  if (bookings.length) {
-    const { error: bookingError } = await supabase.from("job_bookings").insert(bookings);
-    if (bookingError) throw bookingError;
+  const { error: saveError } = await supabase.rpc("aimcg_save_job_with_bookings", {
+    p_job: jobRow,
+    p_bookings: bookings
+  });
+
+  if (saveError) {
+    const functionMissing = ["42883", "PGRST202", "PGRST205"].includes(saveError.code)
+      || /aimcg_save_job_with_bookings|function.*not found/i.test(saveError.message || "");
+    if (functionMissing) {
+      throw new Error("Run SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql before saving jobs or schedules.");
+    }
+    throw saveError;
   }
+
+  const { error: noteSyncError } = await supabase.rpc("aimcg_replace_admin_job_notes", {
+    p_job_id: normalised.id,
+    p_notes: getAdminNotesForSupabase(normalised)
+  });
+  if (noteSyncError) {
+    const functionMissing = ["42883", "PGRST202", "PGRST205"].includes(noteSyncError.code)
+      || /aimcg_replace_admin_job_notes|function.*not found/i.test(noteSyncError.message || "");
+    if (functionMissing) {
+      throw new Error("Run SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql before saving job notes.");
+    }
+    throw noteSyncError;
+  }
+
   await syncArchivedVisitsToSupabase(normalised);
   return normalised;
 }
@@ -3551,12 +4049,13 @@ async function persistJobToSupabase(job) {
 async function syncArchivedVisitsToSupabase(job) {
   if (!supabase || !isUuid(job?.id)) return;
   const visits = Array.isArray(job.priorVisits) ? job.priorVisits : [];
-  for (const visit of visits) {
+  const now = new Date().toISOString();
+  const rows = visits.map(visit => {
     const visitKey = String(visit.id || "");
-    if (!visitKey) continue;
+    if (!visitKey) return null;
     const workerStatus = visit.workerStatus || {};
     const totalMs = Object.values(workerStatus).reduce((sum, state) => sum + Math.max(0, Number(state?.totalMs) || 0), 0);
-    const row = {
+    return {
       job_id: job.id,
       visit_key: visitKey,
       visit_type: visit.reason || "rescheduled",
@@ -3567,13 +4066,14 @@ async function syncArchivedVisitsToSupabase(job) {
       worker_completions: visit.workerCompletions || {},
       total_ms: Math.round(totalMs),
       completed_confirmed: Boolean(visit.completedConfirmed),
-      archived_at: visit.archivedAt || new Date().toISOString(),
+      archived_at: visit.archivedAt || now,
       snapshot: visit,
-      updated_at: new Date().toISOString()
+      updated_at: now
     };
-    const { error } = await supabase.from("job_visit_history").upsert(row, { onConflict: "job_id,visit_key" });
-    if (error && error.code !== "42P01") throw error;
-  }
+  }).filter(Boolean);
+  if (!rows.length) return;
+  const { error } = await supabase.from("job_visit_history").upsert(rows, { onConflict: "job_id,visit_key" });
+  if (error && error.code !== "42P01") throw error;
 }
 
 async function deleteJobFromSupabase(jobId) {
@@ -3636,16 +4136,27 @@ async function insertJobHistoryToSupabase({ jobId, action, details = "", created
 }
 
 
+async function fetchWorkerNameDirectoryFromSupabase() {
+  if (!supabase) return [];
+  const { data, error } = await supabase.rpc("aimcg_worker_name_directory");
+  if (error) {
+    const missing = ["42883", "PGRST202", "PGRST205"].includes(error.code) || /aimcg_worker_name_directory|function.*not found/i.test(error.message || "");
+    if (missing) return [];
+    throw error;
+  }
+  return (data || []).map(worker => ({ id: worker.id, name: worker.name || "Employee" }));
+}
+
 async function fetchToolsFromSupabase() {
   if (!supabase) return [];
   const { data, error } = await supabase.from("tools").select("*").order("description");
-  if (error) { if (["42P01","42501"].includes(error.code)) return []; throw error; }
+  if (error) { if (error.code === "42P01") return []; throw error; }
   return (data||[]).map(row=>({id:row.id,description:row.description||"",toolId:row.tool_id||"",serialNumber:row.serial_number||"",brandModel:row.brand_model||"",status:row.status||"available",assignedWorkerId:row.assigned_worker_id||"",signedOutAt:row.signed_out_at||"",notes:row.notes||"",purchaseDate:row.purchase_date||"",active:row.active!==false,persisted:true}));
 }
 async function fetchToolHistoryFromSupabase() {
   if (!supabase) return [];
   const { data, error } = await supabase.from("tool_transactions").select("*,tools(description,tool_id)").order("created_at",{ascending:false}).limit(500);
-  if (error) { if (["42P01","42501"].includes(error.code)) return []; throw error; }
+  if (error) { if (error.code === "42P01") return []; throw error; }
   return (data||[]).map(row=>({id:row.id,toolId:row.tool_id,toolDescription:row.tools?.description||row.tools?.tool_id||"Tool",action:row.action,workerId:row.worker_id||"",fromWorkerId:row.from_worker_id||"",reason:row.reason||"",createdAt:row.created_at}));
 }
 async function saveToolToSupabase(tool) {
@@ -3655,20 +4166,33 @@ async function saveToolToSupabase(tool) {
   if (!description) throw new Error("Tool description is required.");
   if (!toolCode) throw new Error("Tool ID is required.");
 
+  let existingTool = null;
+  if (tool.persisted && isUuid(tool.id)) {
+    const { data: existing, error: existingError } = await supabase.from("tools").select("status,assigned_worker_id").eq("id", tool.id).maybeSingle();
+    if (existingError) throw existingError;
+    existingTool = existing || null;
+  }
+  const assignedWorkerId = tool.assignedWorkerId || null;
+  const requestedStatus = tool.status || "available";
+  const consistentStatus = assignedWorkerId && requestedStatus === "available"
+    ? "signed_out"
+    : (!assignedWorkerId && requestedStatus === "signed_out" ? "available" : requestedStatus);
+
   const row = {
-    id: tool.id,
     description,
     tool_id: toolCode,
     serial_number: String(tool.serialNumber || "").trim() || null,
     brand_model: String(tool.brandModel || "").trim() || null,
-    status: tool.assignedWorkerId && tool.status === "available" ? "signed_out" : (tool.status || "available"),
-    assigned_worker_id: tool.assignedWorkerId || null,
+    status: consistentStatus,
+    assigned_worker_id: assignedWorkerId,
     signed_out_at: tool.assignedWorkerId ? (tool.signedOutAt || new Date().toISOString()) : null,
     notes: String(tool.notes || "").trim() || null,
     purchase_date: tool.purchaseDate || null,
     active: tool.active !== false && tool.status !== "inactive",
     updated_at: new Date().toISOString()
   };
+
+  if (!tool.persisted && isUuid(tool.id)) row.id = tool.id;
 
   const query = tool.persisted
     ? supabase.from("tools").update(row).eq("id", tool.id)
@@ -3677,39 +4201,183 @@ async function saveToolToSupabase(tool) {
   if (error) throw error;
   if (!saved?.id) throw new Error("Supabase did not return the saved tool. The tool was not confirmed as stored.");
 
+  let historyAction = tool.persisted ? "updated" : "created";
+  let historyReason = tool.persisted ? "Tool details updated" : "Tool added to register";
+  if (tool.persisted && existingTool) {
+    if (existingTool.assigned_worker_id !== saved.assigned_worker_id) {
+      if (existingTool.assigned_worker_id && saved.assigned_worker_id) { historyAction = "transfer"; historyReason = "Tool transferred between employees"; }
+      else if (saved.assigned_worker_id) { historyAction = "sign_out"; historyReason = "Tool assigned by admin"; }
+      else { historyAction = "return"; historyReason = "Tool returned / unassigned by admin"; }
+    } else if (existingTool.status !== saved.status) {
+      if (saved.status === "out_of_service") { historyAction = "out_of_service"; historyReason = "Tool marked out of service"; }
+      else if (saved.status === "available" && existingTool.status === "out_of_service") { historyAction = "return_to_service"; historyReason = "Tool returned to service"; }
+      else if (saved.status === "lost") { historyAction = "lost"; historyReason = "Tool marked lost"; }
+      else if (saved.status === "inactive") { historyAction = "inactive"; historyReason = "Tool marked inactive"; }
+    }
+  }
   const { error: historyError } = await supabase.from("tool_transactions").insert({
     tool_id: saved.id,
-    action: tool.persisted ? "updated" : "created",
+    action: historyAction,
     worker_id: saved.assigned_worker_id || null,
-    reason: tool.persisted ? "Tool details updated" : "Tool added to register"
+    from_worker_id: existingTool?.assigned_worker_id || null,
+    reason: historyReason
   });
   if (historyError) console.warn("Tool saved, but history entry failed", historyError);
   return saved;
 }
 async function deleteToolFromSupabase(toolId) {
   if (!supabase) throw new Error("Supabase is not configured.");
-  const { error: historyError } = await supabase.from("tool_transactions").delete().eq("tool_id", toolId);
-  if (historyError) throw historyError;
-  const { error } = await supabase.from("tools").delete().eq("id", toolId);
+  // tool_transactions has ON DELETE CASCADE. Delete the parent once so a
+  // failed tool delete cannot leave the register without its audit history.
+  const { data, error } = await supabase.from("tools").delete().eq("id", toolId).select("id");
   if (error) throw error;
+  if (!data?.length) throw new Error("The tool was not deleted. Check admin permissions and try again.");
 }
 
 async function saveToolActionToSupabase({tool,action,workerId,reason}) {
   if (!supabase) throw new Error("Supabase is not configured.");
-  let patch={updated_at:new Date().toISOString()};
-  if(action==="sign_out") patch={...patch,status:"signed_out",assigned_worker_id:workerId,signed_out_at:new Date().toISOString()};
-  if(action==="return") patch={...patch,status:"available",assigned_worker_id:null,signed_out_at:null};
-  if(action==="out_of_service") patch={...patch,status:"out_of_service"};
-  if(action==="return_to_service") patch={...patch,status:"available",assigned_worker_id:null,signed_out_at:null};
-  const {error}=await supabase.from("tools").update(patch).eq("id",tool.id); if(error)throw error;
-  const {error:historyError}=await supabase.from("tool_transactions").insert({tool_id:tool.id,action,worker_id:workerId||tool.assignedWorkerId||null,from_worker_id:tool.assignedWorkerId||null,reason:reason||null}); if(historyError)throw historyError;
+  const { error } = await supabase.rpc("aimcg_apply_tool_action", {
+    p_tool_id: tool.id,
+    p_action: action,
+    p_worker_id: isUuid(workerId) ? workerId : null,
+    p_reason: reason || null
+  });
+  if (error) {
+    const functionMissing = ["42883", "PGRST202", "PGRST205"].includes(error.code)
+      || /aimcg_apply_tool_action|function.*not found/i.test(error.message || "");
+    if (functionMissing) {
+      throw new Error("Run SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql before changing tool status.");
+    }
+    throw error;
+  }
 }
 
+
 function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Parts from stock",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
-function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Parts from stock",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},priorVisits:[],currentVisitId:"",currentVisitStartedAt:"",completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],priorVisits:Array.isArray(job.priorVisits)?job.priorVisits:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
+function normaliseJob(job = {}) {
+  const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length
+    ? job.requiredTrades.filter(Boolean)
+    : (job.requiredTrade ? [job.requiredTrade] : []);
+
+  const scheduleBlocks = Array.isArray(job.scheduleBlocks)
+    ? job.scheduleBlocks
+        .map(block => ({
+          id: block.id || createId(),
+          workerId: block.workerId || "",
+          startDate: block.startDate || "",
+          endDate: block.endDate || block.startDate || ""
+        }))
+        .filter(block => block.workerId && block.startDate && block.endDate)
+    : [];
+
+  const base = {
+    client: "",
+    site: "",
+    requiredTrade: "",
+    requiredTrades: [],
+    materialsStatus: "Parts from stock",
+    jobNumber: "",
+    quoteNumber: "",
+    workOrderNumber: "",
+    poNumber: "",
+    jobValue: "",
+    clientPhone: "",
+    appointmentSent: false,
+    clientAccepted: false,
+    isAdHoc: false,
+    isTravelComment: false,
+    materials: [],
+    attachments: [],
+    noteHistory: [],
+    jobHistory: [],
+    workerStatus: {},
+    workerCompletions: {},
+    primaryBookingIds: {},
+    priorVisits: [],
+    currentVisitId: "",
+    currentVisitStartedAt: "",
+    completedConfirmed: false,
+    completedAt: "",
+    isDefectCallback: false,
+    jobStatus: job.category || "To be scheduled",
+    scheduleBlocks: [],
+    machineryBookings: [],
+    safetyPermits: []
+  };
+
+  const merged = { ...base, ...job };
+  const isDefectCallback = Boolean(
+    merged.isDefectCallback || merged.jobStatus === "Call back - Defects"
+  );
+
+  return {
+    ...merged,
+    requiredTrade: trades[0] || merged.requiredTrade || "",
+    requiredTrades: trades,
+    assignedTo: Array.isArray(merged.assignedTo) ? merged.assignedTo.filter(Boolean) : [],
+    scheduleBlocks,
+    machineryBookings: Array.isArray(merged.machineryBookings) ? merged.machineryBookings : [],
+    priorVisits: Array.isArray(merged.priorVisits) ? merged.priorVisits : [],
+    safetyPermits: normaliseSafetyPermits(merged.safetyPermits),
+    workerStatus: merged.workerStatus && typeof merged.workerStatus === "object" ? merged.workerStatus : {},
+    workerCompletions: merged.workerCompletions && typeof merged.workerCompletions === "object" ? merged.workerCompletions : {},
+    primaryBookingIds: merged.primaryBookingIds && typeof merged.primaryBookingIds === "object"
+      ? Object.fromEntries(Object.entries(merged.primaryBookingIds).filter(([workerId, bookingId]) => workerId && isUuid(bookingId)))
+      : {},
+    noteHistory: Array.isArray(merged.noteHistory)
+      ? merged.noteHistory.map(note => ({ ...note, id: isUuid(note?.id) ? note.id : createId() }))
+      : [],
+    jobHistory: Array.isArray(merged.jobHistory) ? merged.jobHistory : [],
+    materials: Array.isArray(merged.materials) ? merged.materials : [],
+    attachments: Array.isArray(merged.attachments) ? merged.attachments : [],
+    jobStatus: merged.jobStatus || (isDefectCallback ? "Call back - Defects" : merged.category || "To be scheduled"),
+    isDefectCallback,
+    endDate: merged.endDate || merged.startDate || ""
+  };
+}
+
 function createId(){ return globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
-function loadData(){ try{const saved=localStorage.getItem(STORAGE_KEY); if(!saved) return initialData; const parsed=JSON.parse(saved); return {...initialData,...parsed,teamMembers:(parsed.teamMembers||[]).map(w=>({birthday:"",sapNumber:w.employeeNumber||"",inactive:false,accessRevoked:false,customWorkStart:"",customWorkEnd:"",customRnrStart:"",customRnrEnd:"",customRepeatUntil:"",...w})),jobs:(parsed.jobs||[]).map(normaliseJob),leaveRecords:parsed.leaveRecords||[],messages:parsed.messages||[]};}catch{return initialData;} }
-function saveData(data){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
+function structuredCloneSafe(value) {
+  if (typeof globalThis.structuredClone === "function") {
+    try {
+      return globalThis.structuredClone(value);
+    } catch {
+      // Fall back to JSON cloning for plain app data.
+    }
+  }
+  if (value === undefined) return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+function loadData() {
+  try {
+    const keys = [STORAGE_KEY, ...LEGACY_STORAGE_KEYS];
+    const cached = keys
+      .map(key => {
+        try {
+          const raw = localStorage.getItem(key);
+          return raw ? JSON.parse(raw) : null;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean);
+
+    // Supabase is authoritative for workers, jobs and messages. Only roster
+    // leave remains local in this version, so stale records from another login
+    // can never flash on screen or be restored after a temporary read error.
+    const localLeave = cached.find(item => Array.isArray(item.leaveRecords) && item.leaveRecords.length)?.leaveRecords || [];
+    return { ...initialData, leaveRecords: localLeave };
+  } catch {
+    return initialData;
+  }
+}
+function saveData(data){
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ leaveRecords: data.leaveRecords || [] }));
+  } catch (error) {
+    console.warn("Could not cache AIM CG leave locally", error);
+  }
+}
 function fileToAttachment(file, label = "Attachment") {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -3772,7 +4440,7 @@ function findSchedulingConflicts(job, worker, date, jobs, leaveRecords) {
   if (jobTradeText(job) && worker.trade && !getJobTrades(job).includes(worker.trade)) conflicts.push(`Job requires ${jobTradeText(job)}, but ${worker.name} is ${worker.trade}`);
   if (!job.clientAccepted && !job.isAdHoc && !job.isTravelComment) conflicts.push("Client appointment has not been accepted");
   if (isAwaitingMaterials(job) && !job.isAdHoc && !job.isTravelComment) conflicts.push(`Materials status is ${job.materialsStatus}`);
-  const clash = jobs.find(other => other.id !== job.id && other.category !== "Cancelled" && other.assignedTo?.includes(worker.id) && isDateWithinRange(date, other.startDate, other.endDate));
+  const clash = jobs.find(other => other.id !== job.id && other.category !== "Cancelled" && jobOccursForWorkerOnDate(other, worker.id, date));
   if (clash) conflicts.push(`${worker.name} already has another job scheduled that day: ${clash.title}`);
   return conflicts;
 }
@@ -3852,7 +4520,6 @@ function moveScheduledOccurrence(job, sourceWorkerId, sourceDate, targetWorkerId
 
   scheduleBlocks = scheduleBlocks.filter(b => b.id !== occurrence.blockId);
   scheduleBlocks.push({ id: createId(), workerId: targetWorkerId, startDate: newStartDate, endDate: newEndDate });
-  if (!assignedTo.includes(targetWorkerId)) assignedTo.push(targetWorkerId);
   return { ...job, assignedTo, scheduleBlocks };
 }
 
@@ -3881,11 +4548,7 @@ function removeScheduledOccurrence(job, sourceWorkerId, sourceDate){
     scheduleBlocks = scheduleBlocks.filter(b => b.id !== occurrence.blockId);
   }
 
-  const stillAssigned = new Set();
-  assignedTo.forEach(id => id && stillAssigned.add(id));
-  scheduleBlocks.forEach(b => b.workerId && stillAssigned.add(b.workerId));
-
-  return { ...job, assignedTo: [...stillAssigned], startDate, endDate, scheduleBlocks };
+  return { ...job, assignedTo, startDate, endDate, scheduleBlocks };
 }
 
 function isLockedCompletedJob(job){
@@ -4054,6 +4717,6 @@ createRoot(document.getElementById("root")).render(<App />);
 if ("serviceWorker" in navigator) {
   window.addEventListener("load", () => {
     navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`, { scope: import.meta.env.BASE_URL })
-      .catch(error => console.error("Jobsched service worker registration failed", error));
+      .catch(error => console.error("AIM CG service worker registration failed", error));
   });
 }

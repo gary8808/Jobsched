@@ -13,7 +13,7 @@ permissions:
 
 concurrency:
   group: "pages"
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   deploy:
@@ -36,6 +36,17 @@ jobs:
         run: |
           echo "VITE_SUPABASE_URL=${{ vars.VITE_SUPABASE_URL }}" >> .env.production
           echo "VITE_SUPABASE_ANON_KEY=${{ vars.VITE_SUPABASE_ANON_KEY }}" >> .env.production
+
+      - name: Validate source
+        run: |
+          if grep -RInE '^(<<<<<<<|=======|>>>>>>>)' src; then
+            echo "Unresolved merge/diff marker found in src"
+            exit 1
+          fi
+          if find src -type f \( -name '*.bak' -o -name '*.orig' \) -print -quit | grep -q .; then
+            echo "Backup source file found in src; remove it before deployment"
+            exit 1
+          fi
 
       - name: Install dependencies
         run: npm install
