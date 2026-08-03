@@ -97,6 +97,36 @@ function logRealtimeStatus(label, status, error) {
   }
 }
 
+
+function TradeJobMaterials({ job, items, locations, movements }) {
+  const inventoryRows = buildJobInventoryMaterialRows(job.id, items, locations, movements)
+    .filter(row => row.net !== 0);
+  const specialOrderMaterials = job.materials || [];
+
+  return (
+    <div className="trade-material-sections">
+      <section>
+        <strong>Inventory materials</strong>
+        {inventoryRows.map(row => (
+          <p key={`${row.item.id}-${row.locationId}`}>
+            • {row.item.itemNumber} · {row.item.name} — {row.net} {row.item.unitOfMeasure}
+            {` (${row.locationName || "Location not set"})`}
+          </p>
+        ))}
+        {!inventoryRows.length && <p>No inventory materials issued.</p>}
+      </section>
+
+      <section>
+        <strong>Special order materials</strong>
+        {specialOrderMaterials.map(material => (
+          <p key={material.id}>• {material.text}</p>
+        ))}
+        {!specialOrderMaterials.length && <p>No special order materials listed.</p>}
+      </section>
+    </div>
+  );
+}
+
 function App() {
   const [data, setData] = useState(loadData);
   const dataRef = useRef(data);
@@ -864,12 +894,6 @@ function App() {
       ]
     };
   }
-  function TradeJobMaterials({job,items,locations,movements}){
-  const inventoryRows=buildJobInventoryMaterialRows(job.id,items,locations,movements).filter(r=>r.net!==0);
-  const special=job.materials||[];
-  return <div className="trade-material-sections"><section><strong>Inventory materials</strong>{inventoryRows.map(r=><p key={`${r.item.id}-${r.locationId}`}>• {r.item.itemNumber} · {r.item.name} — {r.net} {r.item.unitOfMeasure} ({r.locationName||"Location not set"})</p>)}{!inventoryRows.length&&<p>No inventory materials issued.</p>}</section><section><strong>Special order materials</strong>{special.map(m=><p key={m.id}>• {m.text}</p>)}{!special.length&&<p>No special order materials listed.</p>}</section></div>;
-}
-
 function getDraggedJobId(e) {
     const context = readDragContext(e);
     return context.jobId || draggedJobId || selectedBucketJobId;
