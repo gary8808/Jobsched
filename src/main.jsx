@@ -1,12 +1,12 @@
 
-// AIM CG v42 - machinery scheduling
+// AIM CG v43d - mobile tool register, tool details and reliable initial sync
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   Plus, Search, Trash2, Pencil, X, Users, ChevronLeft, ChevronRight,
   PanelLeft, Phone, Mail, MessageSquare, Inbox, Share2, Upload,
   Play, Square, Clock, Paperclip, Package, History, CheckCircle2, UserCog,
-  AlertCircle, CalendarX, Plane, Wrench, RotateCcw, UserMinus, Settings, ZoomIn, ZoomOut, Copy, Download, BookOpen, ChevronUp, ChevronDown, Printer, Tractor, Hammer, Ban, ClipboardList
+  AlertCircle, CalendarX, CalendarDays, Plane, Wrench, RotateCcw, UserMinus, Settings, ZoomIn, ZoomOut, Copy, Download, BookOpen, ChevronUp, ChevronDown, Printer, Tractor, Hammer, Ban, ClipboardList, SlidersHorizontal
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
@@ -16,7 +16,7 @@ import { supabase, supabaseConfig } from "./supabaseClient";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
-const STORAGE_KEY = "aim-cg-v42-machinery";
+const STORAGE_KEY = "aim-cg-v43d-tools";
 const CURRENT_USER = "Demo User";
 
 const CATEGORIES = [
@@ -41,7 +41,7 @@ const JOB_STATUS_OPTIONS = [
 const TRADES = ["Plumber", "Carpenter", "TA", "Electrician", "Refrigeration", "Boilermaker", "Concreter", "Supervisor"];
 const BASE_SITES = ["Paraburdoo", "Brockman", "Busselton", "Karratha", "Tom Price", "Perth", "Other"];
 const LEAVE_TYPES = ["Sick leave", "Annual leave", "Other leave"];
-const MATERIAL_STATUSES = ["Not checked", "Required", "Ordered", "Partially arrived", "Ready", "Not required"];
+const MATERIAL_STATUSES = ["No parts required", "Parts from stock", "Awaiting supplier quote", "Ordered", "Partially arrived", "All parts arrived"];
 const SAFETY_PERMIT_OPTIONS = [
   "Electrical isolations",
   "Transit accommodation required",
@@ -83,7 +83,7 @@ const initialData = {
       client: "Sodexo Remote Sites Australia Pty Ltd.",
       site: "Paraburdoo",
       requiredTrade: "Carpenter",
-      materialsStatus: "Ready",
+      materialsStatus: "Parts from stock",
       jobNumber: "JB04953",
       quoteNumber: "QUO 10574",
       workOrderNumber: "WO 5879466",
@@ -108,7 +108,7 @@ function App() {
   const [view, setView] = useState("admin");
   const [adminTab, setAdminTab] = useState("schedule");
   const [dashboardTab, setDashboardTab] = useState("Action needed");
-  const [employeeId, setEmployeeId] = useState("gary");
+  const [employeeId, setEmployeeId] = useState("");
   const [query, setQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState("To be scheduled");
   const [clientFilter, setClientFilter] = useState("All");
@@ -130,6 +130,9 @@ function App() {
   const [machineryBookings, setMachineryBookings] = useState([]);
   const [machinerySettingsOpen, setMachinerySettingsOpen] = useState(false);
   const [machineryBookingOpen, setMachineryBookingOpen] = useState(null);
+  const [tools, setTools] = useState([]);
+  const [toolHistory, setToolHistory] = useState([]);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const [selectedMachineId, setSelectedMachineId] = useState("");
   const [bucketsCollapsed, setBucketsCollapsed] = useState(false);
   const [calendarPopup, setCalendarPopup] = useState(null);
@@ -225,6 +228,13 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!session || !supabase) return;
+    // Remove any legacy seeded/local employee list immediately. Supabase will
+    // repopulate it with the authoritative worker rows.
+    setData(current => ({ ...current, teamMembers: [] }));
+  }, [session?.user?.id]);
+
+  useEffect(() => {
     let alive = true;
 
     async function checkSupabase() {
@@ -258,11 +268,16 @@ function App() {
         const workers = await fetchWorkersFromSupabase();
         if (!alive) return;
 
+        // Workers are loaded independently from jobs/messages/tools. A failure in
+        // another feature must never leave the old demo employee list on screen.
         setBackendWorkers(workers);
+        setData(current => ({ ...current, teamMembers: workers }));
         let remoteJobs = [];
         let remoteMessages = [];
         let remoteMachinery = [];
         let remoteMachineryBookings = [];
+        let remoteTools = [];
+        let remoteToolHistory = [];
         try {
           setJobsLoading(true);
           remoteJobs = await fetchJobsFromSupabase();
@@ -276,18 +291,20 @@ function App() {
           setJobsLoading(false);
         }
 
+        try { [remoteTools, remoteToolHistory] = await Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()]); } catch (toolError) { console.warn("Tool register not available yet", toolError); }
         setMachinery(remoteMachinery);
         setMachineryBookings(remoteMachineryBookings);
+        setTools(remoteTools);
+        setToolHistory(remoteToolHistory);
         if (!selectedMachineId && remoteMachinery.length) setSelectedMachineId(remoteMachinery[0].id);
-        if (workers.length || remoteJobs.length || remoteMessages.length) {
-          setData(current => ({
-            ...current,
-            teamMembers: workers.length ? workers : current.teamMembers,
-            jobs: remoteJobs.length ? remoteJobs : current.jobs,
-            messages: remoteMessages.length ? remoteMessages : current.messages
-          }));
-          if (workers.length && !workers.some(w => w.id === employeeId)) setEmployeeId(workers[0].id);
-        }
+        // Once authenticated, Supabase is always the source of truth, including
+        // when a table is intentionally empty. Never retain seeded/local workers.
+        setData(current => ({
+          ...current,
+          teamMembers: workers,
+          jobs: remoteJobs,
+          messages: remoteMessages
+        }));
         setJobsSyncMessage(remoteJobs.length ? `Loaded ${remoteJobs.length} job(s) and ${remoteMessages.length} message(s) from Supabase.` : "No Supabase jobs found yet. New/edited jobs will save to Supabase.");
 
         setSupabaseCheck({
@@ -310,6 +327,49 @@ function App() {
     checkSupabase();
     return () => { alive = false; };
   }, [session, authLoading]);
+
+  useEffect(() => {
+    if (!supabase || !session) return;
+
+    let alive = true;
+    let refreshTimer = null;
+
+    async function refreshWorkers() {
+      try {
+        const freshWorkersBase = await fetchWorkersFromSupabase();
+        const costMap = currentProfile?.role === "admin" ? await fetchEmployeeCostsFromSupabase().catch(() => ({})) : {};
+        if (!alive) return;
+        const freshWorkers = freshWorkersBase.map(worker => ({
+          ...worker,
+          internalHourlyCost: costMap[worker.id] ?? worker.internalHourlyCost ?? ""
+        }));
+        setBackendWorkers(freshWorkers);
+        setData(current => ({ ...current, teamMembers: freshWorkers }));
+      } catch (error) {
+        console.error("Could not refresh workers", error);
+      }
+    }
+
+    function queueWorkerRefresh() {
+      clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(refreshWorkers, 250);
+    }
+
+    const channel = supabase
+      .channel(`workers-sync-${session.user?.id || "user"}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "workers" }, queueWorkerRefresh)
+      .subscribe();
+
+    const handleFocus = () => refreshWorkers();
+    window.addEventListener("focus", handleFocus);
+
+    return () => {
+      alive = false;
+      clearTimeout(refreshTimer);
+      window.removeEventListener("focus", handleFocus);
+      supabase.removeChannel(channel);
+    };
+  }, [session?.user?.id, currentProfile?.role]);
 
   useEffect(() => {
     if (!supabase || !session) return;
@@ -403,6 +463,43 @@ function App() {
 
 
   useEffect(() => {
+    if (!supabase || !session) return;
+    let alive = true;
+    async function refreshTools() {
+      try {
+        const [freshTools, freshHistory] = await Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()]);
+        if (!alive) return;
+        setTools(freshTools);
+        setToolHistory(freshHistory);
+      } catch (err) { console.error("Could not refresh tool register", err); }
+    }
+    // Load immediately as well as subscribing. Realtime only reports future
+    // changes, so without this call an existing register can appear empty until
+    // somebody adds or edits a tool.
+    refreshTools();
+    const channel = supabase.channel(`aimcg-tools-${session.user.id}`)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tools" }, refreshTools)
+      .on("postgres_changes", { event: "*", schema: "public", table: "tool_transactions" }, refreshTools)
+      .subscribe();
+    return () => { alive = false; supabase.removeChannel(channel); };
+  }, [session?.user?.id]);
+
+
+
+  useEffect(() => {
+    if (!toolsOpen || !supabase || !session) return;
+    let cancelled = false;
+    Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()])
+      .then(([freshTools, freshHistory]) => {
+        if (cancelled) return;
+        setTools(freshTools);
+        setToolHistory(freshHistory);
+      })
+      .catch(error => console.error("Could not open current tool register", error));
+    return () => { cancelled = true; };
+  }, [toolsOpen, session?.user?.id]);
+
+  useEffect(() => {
     let alive = true;
 
     async function loadCurrentProfile() {
@@ -480,12 +577,22 @@ function App() {
   useEffect(() => {
     if (!currentUser || isAdminUser || !data.teamMembers.length) return;
     const email = String(currentUser.email || "").toLowerCase();
-    const ownWorker = data.teamMembers.find(worker =>
-      worker.profileId === currentUser.id ||
-      (worker.email && worker.email.toLowerCase() === email)
+    const linkedWorker = data.teamMembers.find(worker => worker.profileId === currentUser.id);
+    const emailWorker = data.teamMembers.find(worker =>
+      !worker.profileId && worker.email && worker.email.toLowerCase() === email
     );
+    const ownWorker = linkedWorker || emailWorker;
     if (ownWorker && ownWorker.id !== employeeId) setEmployeeId(ownWorker.id);
+    if (!ownWorker && employeeId) setEmployeeId("");
   }, [currentUser?.id, currentUser?.email, isAdminUser, data.teamMembers, employeeId]);
+
+  useEffect(() => {
+    if (!isAdminUser || !data.teamMembers.length) return;
+    if (!data.teamMembers.some(worker => worker.id === employeeId && !worker.inactive)) {
+      const firstActive = data.teamMembers.find(worker => !worker.inactive);
+      setEmployeeId(firstActive?.id || "");
+    }
+  }, [isAdminUser, data.teamMembers, employeeId]);
 
   const days = useMemo(() => Array.from({ length: calendarDayCount }, (_, i) => addDays(weekStart, i)), [weekStart, calendarDayCount]);
   const employeeDays = useMemo(() => Array.from({ length: 14 }, (_, i) => addDays(new Date(), i)), []);
@@ -1278,12 +1385,24 @@ Reply: ${messageText}` };
       ].filter(Boolean);
       const noteText = noteParts.length ? noteParts.join("\n") : `${workerName} saved a completion update.`;
       try {
-        await Promise.all([
+        const activeVisitId = getCurrentVisitId(changedJob) || "original";
+        // The dedicated completion ledger is the source of truth and must save.
+        // Legacy note/history writes are supplementary and must not make a
+        // successful employee submission appear to have failed.
+        await upsertCompletionSubmissionToSupabase({
+          jobId,
+          workerId,
+          visitId: activeVisitId,
+          completion,
+          createdBy: currentUser?.id || null
+        });
+        const supplementaryWrites = await Promise.allSettled([
           insertJobNoteToSupabase({
             jobId,
             workerId,
             noteText,
             noteType: completion.requiresAnotherTrade ? "completion_follow_up" : "completion",
+            visitId: activeVisitId,
             createdBy: currentUser?.id || null
           }),
           insertJobHistoryToSupabase({
@@ -1295,6 +1414,9 @@ Reply: ${messageText}` };
             createdBy: currentUser?.id || null
           })
         ]);
+        supplementaryWrites.forEach(result => {
+          if (result.status === "rejected") console.warn("Supplementary completion history write failed", result.reason);
+        });
         setJobsSyncMessage("Employee update saved to Supabase.");
       } catch (err) {
         setJobsSyncMessage(`Employee update save failed: ${err.message}`);
@@ -1338,7 +1460,7 @@ Reply: ${messageText}` };
 
   return (
     <div className={activeView === "admin" ? "app admin-mode" : currentUser ? "app nav-mode employee-mode" : "app"}>
-      {currentUser && <SideNav unreadMessages={unreadMessages} isAdmin={isAdminUser} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onReports={() => setReportsOpen(true)} onSettings={() => setSettingsOpen(true)} />}
+      {currentUser && <SideNav unreadMessages={unreadMessages} isAdmin={isAdminUser} onCalendar={() => { setToolsOpen(false); if (isAdminUser) setAdminTab("schedule"); }} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onReports={() => setReportsOpen(true)} onTools={() => setToolsOpen(true)} onSettings={() => setSettingsOpen(true)} />}
       <header className="topbar aim-topbar">
         <div className="brand-block">
           <img src={`${import.meta.env.BASE_URL}aim-logo.png`} alt="AIM Construction Group WA" className="aim-logo" />
@@ -1349,6 +1471,20 @@ Reply: ${messageText}` };
 
       {!currentUser ? (
         <AuthPanel onSignIn={signIn} onForgotPassword={sendPasswordReset} loading={authLoading} />
+      ) : toolsOpen ? (
+        <ToolRegisterPage
+          tools={tools}
+          history={toolHistory}
+          workers={data.teamMembers}
+          currentWorkerId={employeeId}
+          isAdmin={isAdminUser}
+          onClose={()=>setToolsOpen(false)}
+          onRefresh={async()=>{
+            const [freshTools, freshHistory] = await Promise.all([fetchToolsFromSupabase(), fetchToolHistoryFromSupabase()]);
+            setTools(freshTools);
+            setToolHistory(freshHistory);
+          }}
+        />
       ) : activeView === "admin" ? (
         <>
           <section className="toolbar">
@@ -1447,7 +1583,7 @@ Reply: ${messageText}` };
           alert(err?.message || "Could not save employees or send invite.");
         }
       }} />}
-      {settingsOpen && currentUser && <SettingsModal currentUser={currentUser} currentRole={currentRole} isAdminUser={isAdminUser} activeView={activeView} isInstalledPwa={isInstalledPwa} canPromptInstall={Boolean(installPrompt)} onInstall={installJobsched} onManageMachinery={()=>{setSettingsOpen(false);setMachinerySettingsOpen(true);}} onClose={()=>setSettingsOpen(false)} onSetView={(nextView)=>{setView(nextView); setSettingsOpen(false);}} onChangePassword={()=>{setPasswordSetupMode("manual"); setSettingsOpen(false);}} onSignOut={async()=>{setSettingsOpen(false); await signOut();}} />}
+      {settingsOpen && currentUser && <SettingsModal currentUser={currentUser} currentRole={currentRole} isAdminUser={isAdminUser} activeView={activeView} isInstalledPwa={isInstalledPwa} canPromptInstall={Boolean(installPrompt)} onInstall={installJobsched} onManageMachinery={()=>{setSettingsOpen(false);setMachinerySettingsOpen(true);}} onManageTools={()=>{setSettingsOpen(false);setToolsOpen(true);}} onClose={()=>setSettingsOpen(false)} onSetView={(nextView)=>{setView(nextView); setSettingsOpen(false);}} onChangePassword={()=>{setPasswordSetupMode("manual"); setSettingsOpen(false);}} onSignOut={async()=>{setSettingsOpen(false); await signOut();}} />}
       {shareHubOpen && <ShareHubModal onClose={()=>setShareHubOpen(false)} onShare={()=>{setShareHubOpen(false); setShareOpen(true)}} onRunSheet={()=>{setShareHubOpen(false); setRunSheetOpen(true)}} />}
       {shareOpen && <ShareScheduleModal data={data} workers={data.teamMembers} onClose={()=>setShareOpen(false)} />}
       {runSheetOpen && <DailyRunSheetModal data={data} workers={data.teamMembers} onClose={()=>setRunSheetOpen(false)} />}
@@ -1782,14 +1918,14 @@ function CalendarJob({ job, workerId, date, isStart, selected, hasAnyMessage, ha
   const currentVisitId = getCurrentVisitId(job);
   const currentCompletion = job.workerCompletions?.[workerId];
   const completionBelongsToCurrentVisit = !currentVisitId || currentCompletion?.visitId === currentVisitId;
-  const completedByTrade = status === "completed" && completionBelongsToCurrentVisit && Boolean(currentCompletion?.submittedComplete);
+  const completedByTrade = status === "completed" && completionBelongsToCurrentVisit && Boolean(currentCompletion?.submissionId || currentCompletion?.updatedAt);
   const needsAnotherTrade = Object.values(job.workerCompletions || {}).some(c => c.requiresAnotherTrade);
   const defectJob = isDefectJob(job);
   let tabClass = "neutral";
   if (job.category === "Completed" || job.completedConfirmed) tabClass = "completed";
-  else if (needsAnotherTrade) tabClass = "followup";
-  else if (job.clientAccepted) tabClass = "confirmed";
   else if (defectJob) tabClass = "defect";
+  else if (isAwaitingMaterials(job) || needsAnotherTrade) tabClass = "followup";
+  else if (isMaterialsReady(job) && getReadiness(job).ready) tabClass = "confirmed";
   return (
     <article className={`calendar-job ${selected ? "selected-booking" : ""} ${defectJob ? "defect-callback" : ""} ${job.category === "Completed" || job.completedConfirmed ? "supervisor-complete" : ""} ${completedByTrade && job.category !== "Completed" ? "trade-complete" : ""} ${job.isAdHoc?"ad-hoc":""} ${job.isTravelComment?"travel-comment":""} ${isStart?"range-start":"range-middle"}`} draggable onDragStart={onDragStart} onClick={onSelect}>
       <div className="range-body">
@@ -1837,6 +1973,7 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
   const [form, setForm] = useState(normaliseJob({ ...job, machineryBookings: (job.machineryBookings?.length ? job.machineryBookings : machineryBookings.filter(b=>b.jobId===job.id)) }));
   const [activeTab, setActiveTab] = useState(job._openClientTab ? "client" : "details");
   const [noteInput, setNoteInput] = useState("");
+  const [showNoteInTradeView, setShowNoteInTradeView] = useState(false);
   const [materialInput, setMaterialInput] = useState("");
   const [messageText, setMessageText] = useState(job._messageMode === "reschedule" ? buildRescheduleMessage(normaliseJob(job)) : buildScheduleMessage(normaliseJob(job)));
   const [attachmentUploading, setAttachmentUploading] = useState(false);
@@ -1858,7 +1995,7 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
     }));
   }
   function toggleWorker(id){ const list=form.assignedTo||[]; update("assignedTo", list.includes(id)?list.filter(x=>x!==id):[...list,id]); }
-  function addNote(){ if(!noteInput.trim()) return; setForm(cur=>({...cur,noteHistory:[{id:createId(),date:new Date().toISOString(),user:CURRENT_USER,text:noteInput.trim()},...(cur.noteHistory||[])]})); setNoteInput(""); }
+  function addNote(){ if(!noteInput.trim()) return; setForm(cur=>({...cur,noteHistory:[{id:createId(),date:new Date().toISOString(),user:CURRENT_USER,text:noteInput.trim(),showInTradeView:Boolean(showNoteInTradeView)},...(cur.noteHistory||[])]})); setNoteInput(""); setShowNoteInTradeView(false); }
   function addMaterial(){ if(!materialInput.trim()) return; setForm(cur=>({...cur,materials:[...(cur.materials||[]),{id:createId(),text:materialInput.trim(),status:"Required"}]})); setMaterialInput(""); }
   async function addAttachments(files){
     const fileList = [...(files || [])];
@@ -1938,18 +2075,18 @@ function JobModal({ job, teamMembers, currentUser, isAdmin = false, messages = [
   return <div className="modal-backdrop"><form className="modal job-modal-tabs" onSubmit={submit}><div className="modal-header clean-modal-header"><div><h2>{job.title?"Edit job":"New job"}</h2><p>{form.jobNumber||form.workOrderNumber||form.poNumber||"Job details"}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><div className="job-tab-bar">{tabs.map(t=><button type="button" key={t} className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)}>{labelTab(t)}</button>)}</div>
   {activeTab==="details"&&<section className="job-tab-panel"><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div>{isAdmin && <label>Job value excluding GST ($)<input type="number" min="0" step="0.01" value={form.jobValue ?? ""} onChange={e=>update("jobValue", e.target.value === "" ? "" : Number(e.target.value))}/></label>}<label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label></section>}
   {activeTab==="scheduling"&&<section className="job-tab-panel">
-    <div className="two-col"><label>Bucket / schedule category<select value={form.category} onChange={e=>setForm(cur=>{ const nextCategory = e.target.value; const keepDefect = nextCategory === "Scheduled" && cur.jobStatus === "Call back - Defects"; return { ...cur, category: nextCategory, jobStatus: keepDefect ? "Call back - Defects" : nextCategory, isDefectCallback: keepDefect }; })}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></label><label>Job status<select value={form.jobStatus || form.category || "To be scheduled"} onChange={e=>setForm(cur=>({...cur, jobStatus:e.target.value, isDefectCallback:e.target.value === "Call back - Defects"}))}>{JOB_STATUS_OPTIONS.map(c=><option key={c}>{c}</option>)}</select></label></div>
+    <div className="two-col"><label>Bucket / schedule category<select value={form.category} onChange={e=>setForm(cur=>{ const nextCategory = e.target.value; const keepDefect = nextCategory === "Scheduled" && cur.jobStatus === "Call back - Defects"; return { ...cur, category: nextCategory, jobStatus: keepDefect ? "Call back - Defects" : nextCategory, isDefectCallback: keepDefect }; })}>{CATEGORIES.map(c=><option key={c}>{c}</option>)}</select></label><label>Work status<input value={form.isDefectCallback ? "Call back - Defects" : "Managed automatically from schedule and Trade View"} readOnly/></label></div>
     <label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{JOB_SITES.map(site=><option key={site}>{site}</option>)}</select></label>
     {form.jobStatus === "Call back - Defects" && <div className="defect-warning"><strong>Call back / defects job</strong><span>This job will show red on the calendar. Keep the bucket/category as Scheduled once it is rebooked.</span></div>}
-    <label>Materials status<select value={form.materialsStatus||"Not checked"} onChange={e=>update("materialsStatus",e.target.value)}>{MATERIAL_STATUSES.map(m=><option key={m}>{m}</option>)}</select></label>
+    <label>Materials status<select value={form.materialsStatus||"Parts from stock"} onChange={e=>update("materialsStatus",e.target.value)}>{MATERIAL_STATUSES.map(m=><option key={m}>{m}</option>)}</select></label>
     <SafetyPermitPicker permits={getSafetyPermits(form)} onAdd={addSafetyPermit} onToggle={updateSafetyPermit} onRemove={removeSafetyPermit} />
     <div className="worker-picker"><strong>Assigned workers for the main booking dates</strong><p className="muted">The main booking uses the start and end dates on the Details tab.</p><div className="worker-options">{teamMembers.map(m=><label key={m.id} className="check-option"><input type="checkbox" checked={form.assignedTo.includes(m.id)} onChange={()=>toggleWorker(m.id)}/>{m.name}</label>)}</div></div>
     <section className="schedule-blocks-panel"><div className="card-top"><div><strong>Additional booking days / employees</strong><p className="muted">Use this for non-consecutive days, return visits, or different employees on different dates.</p></div><button type="button" className="secondary" onClick={addScheduleBlock}><Plus size={15}/> Add booking</button></div>{(form.scheduleBlocks||[]).map(block=><div className="schedule-block-row" key={block.id}><label>Employee<select value={block.workerId||""} onChange={e=>updateScheduleBlock(block.id,"workerId",e.target.value)}><option value="">Select employee</option>{teamMembers.map(m=><option key={m.id} value={m.id}>{m.name}</option>)}</select></label><label>Start<input type="date" value={block.startDate||""} onChange={e=>updateScheduleBlock(block.id,"startDate",e.target.value)}/></label><label>End<input type="date" value={block.endDate||""} onChange={e=>updateScheduleBlock(block.id,"endDate",e.target.value)}/></label><button type="button" className="icon" onClick={()=>removeScheduleBlock(block.id)}><X size={15}/></button></div>)}{!(form.scheduleBlocks||[]).length&&<p className="muted">No additional booking rows added.</p>}</section>
     {isAdmin && <section className="schedule-blocks-panel machinery-job-panel"><div className="card-top"><div><strong>Machinery bookings</strong><p className="muted">Book one or more machines for all or part of this job.</p></div><button type="button" className="secondary" onClick={addMachineryBooking}><Tractor size={15}/> Add machinery</button></div>{(form.machineryBookings||[]).map(row=>{const conflict=machineryConflict(row);return <div className={`machinery-booking-row ${conflict?"has-conflict":""}`} key={row.id}><label>Machine<select value={row.machineId||""} onChange={e=>updateMachineryBooking(row.id,"machineId",e.target.value)}><option value="">Select machine</option>{machines.filter(m=>m.status!=="out_of_service"&&m.active!==false).map(m=><option key={m.id} value={m.id}>{machineDisplayName(m)}</option>)}</select></label><label>Employee<select value={row.workerId||""} onChange={e=>updateMachineryBooking(row.id,"workerId",e.target.value)}><option value="">Select employee</option>{teamMembers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label>Start<input type="date" value={row.startDate||""} onChange={e=>updateMachineryBooking(row.id,"startDate",e.target.value)}/></label><label>End<input type="date" value={row.endDate||""} onChange={e=>updateMachineryBooking(row.id,"endDate",e.target.value)}/></label><label>Period<select value={row.period||"full_day"} onChange={e=>updateMachineryBooking(row.id,"period",e.target.value)}><option value="am">AM</option><option value="pm">PM</option><option value="full_day">Full day</option></select></label><button type="button" className="icon" onClick={()=>removeMachineryBooking(row.id)}><X size={15}/></button>{conflict&&<span className="booking-conflict">Unavailable: {conflict.description||conflict.jobTitle||"existing booking"}</span>}</div>})}{!(form.machineryBookings||[]).length&&<p className="muted">No machinery booked.</p>}</section>}
   </section>}
   {activeTab==="client"&&<section className="job-tab-panel"><div className="two-col"><label>Client contact<input value={form.clientContact||""} onChange={e=>update("clientContact",e.target.value)}/></label><label>Client phone<input value={form.clientPhone||""} onChange={e=>update("clientPhone",e.target.value)} placeholder="e.g. 04xx xxx xxx or +61..."/></label></div><div className="appointment-panel stacked"><label className="check-option plain"><input type="checkbox" checked={!!form.appointmentSent} onChange={e=>update("appointmentSent",e.target.checked)}/>Appointment SMS sent</label><label className="check-option plain"><input type="checkbox" checked={!!form.clientAccepted} onChange={e=>update("clientAccepted",e.target.checked)}/>Client accepted appointment</label><div className="message-template-actions"><button type="button" className="secondary" onClick={()=>setMessageText(buildScheduleMessage(form))}>Scheduling message</button><button type="button" className="secondary" onClick={()=>setMessageText(buildRescheduleMessage(form))}>Reschedule message</button></div><label className="full-width-label">SMS message text<textarea rows="5" value={messageText} onChange={e=>setMessageText(e.target.value)}/></label><button type="button" className={smsStatus === "SMS sent and saved" ? "secondary success-button" : "secondary"} disabled={smsSending} onClick={handleSendClientMessage}><MessageSquare size={16}/> {smsSending ? "Sending..." : smsStatus === "SMS sent and saved" ? "SMS sent" : "Send SMS"}</button>{smsStatus && <span className={smsStatus === "SMS sent and saved" ? "success-text" : "error-text"}>{smsStatus}</span>}<a className="secondary" href={form.clientPhone?`tel:${form.clientPhone}`:undefined} onClick={(e)=>{if(!form.clientPhone){e.preventDefault(); alert("Enter a client phone number first.")}}}><Phone size={16}/> Call client</a></div><section className="message-history-panel"><div className="card-top"><div><strong>SMS history</strong><p className="muted">Sent and received messages linked to this job.</p></div></div><div className="message-list compact">{jobMessages.map(m=><article key={m.id} className={m.unread&&!m.actioned?"message-card unread":"message-card"}><div><strong>{m.direction==="in"?"Received":"Sent"}: {m.direction==="in"?(m.from||m.phoneNumber||"Client"):(m.to||m.phoneNumber||"Client")}</strong><span>{formatDateTime(m.date)}</span></div><p>{m.text||"(No message text)"}</p>{m.actioned&&m.actionedAt&&<em>Actioned {m.actionedBy?`by ${m.actionedBy} `:""}on {formatDateTime(m.actionedAt)}</em>}{!m.actioned&&m.direction==="in"&&<ReplyAction message={m} onReply={onReplyMessage || onActionMessage} />}</article>)}{!jobMessages.length&&<div className="empty small">No SMS messages linked to this job yet.</div>}</div></section></section>}
-  {activeTab==="notes"&&<section className="job-tab-panel"><label>Job description / scope<textarea rows="6" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><div className="note-entry"><textarea rows="3" value={noteInput} onChange={e=>setNoteInput(e.target.value)} placeholder="Add note history entry..."/><button type="button" className="secondary" onClick={addNote}>Add note</button></div><HistoryList items={form.noteHistory||[]} type="notes"/></section>}
-  {activeTab==="materials"&&<section className="job-tab-panel"><label>Materials status<select value={form.materialsStatus||"Not checked"} onChange={e=>update("materialsStatus",e.target.value)}>{MATERIAL_STATUSES.map(m=><option key={m}>{m}</option>)}</select></label><div className="note-entry"><input value={materialInput} onChange={e=>setMaterialInput(e.target.value)} placeholder="Add material item..."/><button type="button" className="secondary" onClick={addMaterial}><Package size={16}/> Add material</button></div><div className="simple-list">{(form.materials||[]).map(item=><div key={item.id}><span>{item.text}</span><button type="button" onClick={()=>setForm(cur=>({...cur,materials:cur.materials.filter(x=>x.id!==item.id)}))}><X size={14}/></button></div>)}{!(form.materials||[]).length&&<p>No materials added.</p>}</div></section>}
+  {activeTab==="notes"&&<section className="job-tab-panel"><div className="note-entry note-entry-stacked"><textarea rows="3" value={noteInput} onChange={e=>setNoteInput(e.target.value)} placeholder="Add note history entry..."/><label className="inline-check"><input type="checkbox" checked={showNoteInTradeView} onChange={e=>setShowNoteInTradeView(e.target.checked)}/>Show note in Trade View</label><button type="button" className="secondary" onClick={addNote}>Add note</button></div><HistoryList items={form.noteHistory||[]} type="notes" onToggleTrade={(id,value)=>setForm(cur=>({...cur,noteHistory:(cur.noteHistory||[]).map(n=>n.id===id?{...n,showInTradeView:value}:n)}))}/></section>}
+  {activeTab==="materials"&&<section className="job-tab-panel"><label>Materials status<select value={form.materialsStatus||"Parts from stock"} onChange={e=>update("materialsStatus",e.target.value)}>{MATERIAL_STATUSES.map(m=><option key={m}>{m}</option>)}</select></label><div className="note-entry"><input value={materialInput} onChange={e=>setMaterialInput(e.target.value)} placeholder="Add material item..."/><button type="button" className="secondary" onClick={addMaterial}><Package size={16}/> Add material</button></div><div className="simple-list">{(form.materials||[]).map(item=><div key={item.id}><span>{item.text}</span><button type="button" onClick={()=>setForm(cur=>({...cur,materials:cur.materials.filter(x=>x.id!==item.id)}))}><X size={14}/></button></div>)}{!(form.materials||[]).length&&<p>No materials added.</p>}</div></section>}
   {activeTab==="attachments"&&<section className="job-tab-panel"><div className="attachment-drop" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault(); addAttachments(e.dataTransfer.files||[]);}}><Paperclip size={24}/><strong>Drag files or photos here</strong><span>Files are uploaded to Supabase Storage and linked to this job.</span><label className="secondary file-pick">Choose files<input type="file" multiple disabled={attachmentUploading} onChange={e=>addAttachments(e.target.files||[])}/></label>{attachmentUploading && <span className="muted">Uploading...</span>}</div><div className="simple-list">{(form.attachments||[]).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button><button type="button" onClick={()=>setForm(cur=>({...cur,attachments:cur.attachments.filter(x=>x.id!==a.id)}))}><X size={14}/></button></div>)}</div></section>}
   {activeTab==="history"&&<section className="job-tab-panel"><HistoryList items={form.jobHistory||[]} type="history"/></section>}
   <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary">Save job</button></div></form></div>
@@ -2097,34 +2234,102 @@ function getAllAssignedWorkerIds(job){ return [...new Set([...(job.assignedTo||[
 function getJobCompletionDate(job){ const dates=Object.values(job.workerCompletions||{}).map(c=>c?.updatedAt).filter(Boolean).sort(); return dates.at(-1) || job.completedAt || ""; }
 function formatMoney(value){ return new Intl.NumberFormat("en-AU",{style:"currency",currency:"AUD"}).format(Number(value)||0); }
 
-function SideNav({ unreadMessages, isAdmin, onShare, onMessages, onPeople, onReports, onSettings }) {
+function SideNav({ unreadMessages, isAdmin, onCalendar, onShare, onMessages, onPeople, onReports, onTools, onSettings }) {
   return (
     <nav className="side-nav" aria-label="Main actions">
+      <button title="Calendar / schedule" onClick={onCalendar}><CalendarDays size={22}/></button>
       {isAdmin && <button title="Share" onClick={onShare}><Share2 size={22}/></button>}
       {isAdmin && <button title="Messages" onClick={onMessages} className="side-nav-message"><Inbox size={22}/>{unreadMessages > 0 && <span>{unreadMessages}</span>}</button>}
       {isAdmin && <button title="People" onClick={onPeople}><Users size={22}/></button>}
       {isAdmin && <button title="Reports" onClick={onReports}><BookOpen size={22}/></button>}
+      <button title="Tool register" onClick={onTools}><Wrench size={22}/></button>
       <button title="Settings" onClick={onSettings}><Settings size={22}/></button>
     </nav>
   );
 }
 
-function SettingsModal({ currentUser, currentRole, isAdminUser, activeView, isInstalledPwa, canPromptInstall, onInstall, onManageMachinery, onClose, onSetView, onChangePassword, onSignOut }) {
+function SettingsModal({ currentUser, currentRole, isAdminUser, activeView, isInstalledPwa, canPromptInstall, onInstall, onManageMachinery, onManageTools, onClose, onSetView, onChangePassword, onSignOut }) {
   return (
     <div className="modal-backdrop">
       <div className="modal mini-modal settings-menu-modal">
         <div className="modal-header"><div><h2>Settings</h2><p>{currentUser?.email || "Signed in user"} · {currentRole}</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>
         <div className="settings-action-list">
+          {isAdminUser && <button type="button" className={activeView === "admin" ? "choice-card active" : "choice-card"} onClick={() => onSetView("admin")}><UserCog/><strong>Admin View</strong><span>Scheduling, dashboards, reports and administration.</span></button>}
+          <button type="button" className={activeView === "employee" ? "choice-card active" : "choice-card"} onClick={() => onSetView("employee")}><Users/><strong>Trade View</strong><span>Assigned work, completion updates and tools.</span></button>
           {isAdminUser && <button type="button" className="choice-card" onClick={onManageMachinery}><Tractor/><strong>Manage machinery</strong><span>Add machines, asset details and out-of-service status.</span></button>}
-          {isAdminUser && <button type="button" className={activeView === "admin" ? "choice-card active" : "choice-card"} onClick={() => onSetView("admin")}><UserCog/><strong>Admin view</strong><span>Calendar, job dashboard, people and settings.</span></button>}
-          <button type="button" className={activeView === "employee" ? "choice-card active" : "choice-card"} onClick={() => onSetView("employee")}><Users/><strong>Employee view</strong><span>Employee schedule, notes and job operation controls.</span></button>
-          <button type="button" className="choice-card" onClick={onInstall} disabled={isInstalledPwa}><Download/><strong>{isInstalledPwa ? "App installed" : "Install AIM CG"}</strong><span>{isInstalledPwa ? "AIM CG is running as an installed app on this device." : canPromptInstall ? "Add an AIM CG icon to this device." : "Show instructions to add AIM CG to the home screen."}</span></button>
+          {isAdminUser && <button type="button" className="choice-card" onClick={onManageTools}><Wrench/><strong>Manage tools</strong><span>Add, assign, transfer and return tools.</span></button>}
           <button type="button" className="choice-card" onClick={onChangePassword}><Settings/><strong>Change password</strong><span>Set or update the password for this account.</span></button>
           <button type="button" className="choice-card" onClick={onSignOut}><X/><strong>Sign out</strong><span>Log out of AIM CG on this device.</span></button>
+          <button type="button" className="choice-card" onClick={onInstall} disabled={isInstalledPwa}><Download/><strong>{isInstalledPwa ? "App Installed" : "Install AIM CG"}</strong><span>{isInstalledPwa ? "AIM CG is running as an installed app on this device." : canPromptInstall ? "Add an AIM CG icon to this device." : "Show instructions to add AIM CG to the home screen."}</span></button>
         </div>
       </div>
     </div>
   );
+}
+
+function ToolRegisterPage({ tools, history, workers, currentWorkerId, isAdmin, onClose, onRefresh }) {
+  const [query,setQuery]=useState("");
+  const [selectedTool,setSelectedTool]=useState(null);
+  const [busy,setBusy]=useState(false);
+  const q=query.trim().toLowerCase();
+  const visibleTools = tools.filter(tool => {
+    if (!isAdmin && tool.assignedWorkerId !== currentWorkerId && tool.status !== "available") return false;
+    return !q || [tool.description, tool.toolId, tool.serialNumber, tool.brandModel].join(" ").toLowerCase().includes(q);
+  });
+  const ownHistory = isAdmin ? history : history.filter(item=>item.workerId===currentWorkerId||item.fromWorkerId===currentWorkerId);
+
+  async function act(tool, action, workerId = null, reason = "") {
+    setBusy(true);
+    try { await saveToolActionToSupabase({ tool, action, workerId, reason }); await onRefresh(); }
+    catch (error) { alert(error.message || "Could not save tool"); }
+    finally { setBusy(false); }
+  }
+  async function saveTool(tool) {
+    setBusy(true);
+    try {
+      const saved = await saveToolToSupabase(tool);
+      await onRefresh();
+      setSelectedTool(null);
+    } catch (error) { alert(error.message || "Could not save tool"); }
+    finally { setBusy(false); }
+  }
+  async function deleteTool(tool) {
+    if (!confirm(`Delete ${tool.description || tool.toolId} permanently? This also removes its tool history and cannot be undone.`)) return;
+    setBusy(true);
+    try { await deleteToolFromSupabase(tool.id); await onRefresh(); setSelectedTool(null); }
+    catch (error) { alert(error.message || "Could not delete tool"); }
+    finally { setBusy(false); }
+  }
+  function newTool(){ setSelectedTool({id:createId(),description:"",toolId:"",serialNumber:"",brandModel:"",purchaseDate:"",status:"available",assignedWorkerId:"",notes:"",active:true,persisted:false}); }
+
+  return <main className="tool-register-page"><section className="tool-register-shell">
+    <div className="tool-register-page-header"><div><h1>Tool Register</h1><p>{isAdmin ? "Manage tool allocation, status and history." : "View your tools, sign out available tools and report faults."}</p></div><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div>
+    <div className="tool-register-actions"><div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Filter by description or tool ID..."/></div>{isAdmin&&<button className="primary" onClick={newTool}><Plus size={16}/> Add tool</button>}</div>
+
+    <div className="tool-table-wrap desktop-tool-table"><table className="tool-table"><thead><tr><th>Description</th><th>Tool ID</th><th>Last/current holder</th><th>Signed out</th><th>Status</th><th>Actions</th></tr></thead><tbody>{visibleTools.map(tool=>{const holder=getWorkerName(workers,tool.assignedWorkerId);return <tr key={tool.id}><td>{isAdmin?<button type="button" className="tool-name-link" onClick={()=>setSelectedTool({...tool})}>{tool.description}</button>:<strong>{tool.description}</strong>}<small>{tool.brandModel||tool.serialNumber}</small></td><td>{tool.toolId}</td><td>{tool.assignedWorkerId?holder:"—"}</td><td>{tool.signedOutAt?formatDateTime(tool.signedOutAt):"—"}</td><td><span className={`tool-status ${tool.status}`}>{tool.status.replaceAll("_"," ")}</span></td><td><ToolQuickActions tool={tool} isAdmin={isAdmin} currentWorkerId={currentWorkerId} busy={busy} onAct={act}/></td></tr>})}</tbody></table>{!visibleTools.length&&<div className="empty">No tools found.</div>}</div>
+
+    <div className="mobile-tool-list">{visibleTools.map(tool=>{const holder=getWorkerName(workers,tool.assignedWorkerId);return <article className="mobile-tool-card" key={tool.id}><div className="mobile-tool-card-head"><div>{isAdmin?<button type="button" className="tool-name-link" onClick={()=>setSelectedTool({...tool})}>{tool.description}</button>:<strong>{tool.description}</strong>}<span>{tool.toolId}</span></div><span className={`tool-status ${tool.status}`}>{tool.status.replaceAll("_"," ")}</span></div><dl><div><dt>Holder</dt><dd>{tool.assignedWorkerId?holder:"—"}</dd></div><div><dt>Signed out</dt><dd>{tool.signedOutAt?formatDateTime(tool.signedOutAt):"—"}</dd></div>{tool.brandModel&&<div><dt>Brand / model</dt><dd>{tool.brandModel}</dd></div>}</dl><ToolQuickActions tool={tool} isAdmin={isAdmin} currentWorkerId={currentWorkerId} busy={busy} onAct={act}/></article>})}{!visibleTools.length&&<div className="empty">No tools found.</div>}</div>
+
+    {!isAdmin&&<details className="tool-history-panel"><summary>My tool use history</summary>{ownHistory.map(item=><div key={item.id} className="tool-history-row"><strong>{item.action.replaceAll("_"," ")}</strong><span>{item.toolDescription} · {formatDateTime(item.createdAt)}</span><p>{item.reason||""}</p></div>)}{!ownHistory.length&&<p>No history recorded.</p>}</details>}
+    {selectedTool&&<ToolDetailModal tool={selectedTool} history={history.filter(item=>item.toolId===selectedTool.id)} workers={workers} isAdmin={isAdmin} busy={busy} onClose={()=>setSelectedTool(null)} onSave={saveTool} onDelete={deleteTool}/>} 
+  </section></main>;
+}
+
+function ToolQuickActions({ tool, isAdmin, currentWorkerId, busy, onAct }) {
+  return <div className="tool-row-actions">{!isAdmin&&tool.status==="available"&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"sign_out",currentWorkerId)}>Sign out</button>}{tool.status==="signed_out"&&((isAdmin)||tool.assignedWorkerId===currentWorkerId)&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"return",tool.assignedWorkerId)}>Return</button>}{tool.status!=="out_of_service"&&tool.status!=="inactive"&&<button disabled={busy} className="mini-action danger" onClick={()=>{const reason=prompt("Describe the fault / reason");if(reason)onAct(tool,"out_of_service",tool.assignedWorkerId,reason)}}>Out of service</button>}{isAdmin&&tool.status==="out_of_service"&&<button disabled={busy} className="mini-action" onClick={()=>onAct(tool,"return_to_service",null,"Returned to service by admin")}>Return to service</button>}</div>;
+}
+
+function ToolDetailModal({ tool, history, workers, isAdmin, busy, onClose, onSave, onDelete }) {
+  const [tab,setTab]=useState("information");
+  const [form,setForm]=useState(tool);
+  useEffect(()=>setForm(tool),[tool.id]);
+  const update=(k,v)=>setForm(cur=>({...cur,[k]:v}));
+  function markInactive(){ setForm(cur=>({...cur,active:false,status:"inactive",assignedWorkerId:"",signedOutAt:""})); }
+  return <div className="nested-modal"><div className="modal tool-detail-modal"><div className="modal-header"><div><h3>{tool.persisted ? tool.description : "Add tool"}</h3><p>{tool.toolId || "New register item"}</p></div><button className="icon" onClick={onClose}><X size={16}/></button></div>
+    <div className="tool-detail-tabs"><button className={tab==="information"?"active":""} onClick={()=>setTab("information")}>Information</button><button className={tab==="history"?"active":""} onClick={()=>setTab("history")}>History <span>{history.length}</span></button></div>
+    {tab==="information"?<div className="tool-detail-body"><label>Tool description<input disabled={!isAdmin} value={form.description||""} onChange={e=>update("description",e.target.value)}/></label><div className="two-col"><label>Tool ID<input disabled={!isAdmin} value={form.toolId||""} onChange={e=>update("toolId",e.target.value)}/></label><label>Serial number<input disabled={!isAdmin} value={form.serialNumber||""} onChange={e=>update("serialNumber",e.target.value)}/></label></div><div className="two-col"><label>Brand / model<input disabled={!isAdmin} value={form.brandModel||""} onChange={e=>update("brandModel",e.target.value)}/></label><label>Purchase date<input disabled={!isAdmin} type="date" value={form.purchaseDate||""} onChange={e=>update("purchaseDate",e.target.value)}/></label></div><label>Assigned employee<select disabled={!isAdmin} value={form.assignedWorkerId||""} onChange={e=>update("assignedWorkerId",e.target.value)}><option value="">Unassigned</option>{workers.filter(w=>!w.inactive).map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label><label>Status<select disabled={!isAdmin} value={form.status||"available"} onChange={e=>update("status",e.target.value)}><option value="available">Available</option><option value="signed_out">Signed out</option><option value="out_of_service">Out of service</option><option value="lost">Lost</option><option value="inactive">Inactive</option></select></label><label>Notes<textarea disabled={!isAdmin} rows="4" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label></div>:<div className="tool-detail-history">{history.map(item=><div key={item.id} className="tool-history-row"><strong>{item.action.replaceAll("_"," ")}</strong><span>{formatDateTime(item.createdAt)}{item.workerId?` · ${getWorkerName(workers,item.workerId)}`:""}</span><p>{item.reason||""}</p></div>)}{!history.length&&<p className="empty">No history recorded for this tool.</p>}</div>}
+    <div className="modal-actions tool-detail-actions">{isAdmin&&tool.persisted&&<button className="secondary danger" disabled={busy} onClick={()=>onDelete(tool)}>Delete permanently</button>}{isAdmin&&tool.persisted&&form.status!=="inactive"&&<button className="secondary" disabled={busy} onClick={markInactive}>Mark inactive</button>}<span className="modal-action-spacer"/><button className="secondary" onClick={onClose}>Close</button>{isAdmin&&tab==="information"&&<button className="primary" disabled={busy} onClick={()=>onSave(form)}>Save tool</button>}</div>
+  </div></div>;
 }
 
 function ShareHubModal({ onClose, onShare, onRunSheet }) {
@@ -2373,7 +2578,7 @@ function MessagesModal({ messages, jobs, onClose, onAction, onReply }) {
 }
 
 function HistoryModal({ job, onClose }) { return <div className="modal-backdrop"><div className="modal mini-modal"><div className="modal-header"><h2>Job history</h2><button className="icon" onClick={onClose}><X size={18}/></button></div><HistoryList items={job.jobHistory||[]} type="history"/></div></div> }
-function HistoryList({ items }) { return <div className="history-list">{items.map(i=><div key={i.id}><strong>{i.action||i.user}</strong><span>{formatDateTime(i.date)} · {i.user}</span><p>{i.details||i.text}</p></div>)}{!items.length&&<p>No entries yet.</p>}</div> }
+function HistoryList({ items, onToggleTrade }) { return <div className="history-list">{items.map(i=><div key={i.id}><strong>{i.action||i.user}</strong><span>{formatDateTime(i.date)} · {i.user}</span><p>{i.details||i.text}</p>{onToggleTrade && <label className="inline-check compact-check"><input type="checkbox" checked={Boolean(i.showInTradeView)} onChange={e=>onToggleTrade(i.id,e.target.checked)}/>Show in Trade View</label>}</div>)}{!items.length&&<p>No entries yet.</p>}</div> }
 
 function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords, onStatus, onAddAttachment, onCompletion, canSwitchWorker = false, machines = [], machineryBookings = [] }) {
   const [range, setRange] = useState("today");
@@ -2381,7 +2586,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   const [completionDrafts, setCompletionDrafts] = useState({});
   const [completionSaveStatus, setCompletionSaveStatus] = useState({});
 
-  const worker = workers.find(w => w.id === workerId) || workers[0];
+  const worker = workers.find(w => w.id === workerId) || (canSwitchWorker ? workers.find(w => !w.inactive) : null);
   const startIso = getIsoDate(days[0]);
   const endIso = getIsoDate(days[days.length - 1]);
   const visible = jobs.filter(j =>
@@ -2423,6 +2628,20 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
       setCompletionSaveStatus(current => ({ ...current, [job.id]: "error" }));
       alert(err?.message || "Could not save update.");
     }
+  }
+
+  if (!worker) {
+    return (
+      <main className="employee-view app-like-view">
+        <section className="employee-app-header">
+          <div>
+            <span className="app-kicker">Trade View</span>
+            <h2>Login not linked to an employee</h2>
+            <p>An administrator needs to link this login to the correct employee record in Manage Employees.</p>
+          </div>
+        </section>
+      </main>
+    );
   }
 
   return (
@@ -2487,7 +2706,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
                         <div className="employee-quick-info">
                           <span>{job.site || "No site"}</span>
                           <span>{jobTradeText(job) || "No trade set"}</span>
-                          <span>Materials: {job.materialsStatus || "Not checked"}</span>
+                          <span>Materials: {job.materialsStatus || "Parts from stock"}</span>
                         </div>
                         {machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).length>0 && <div className="employee-machinery-panel"><strong><Tractor size={15}/> Machinery assigned</strong>{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).map(b=>{const machine=machines.find(m=>m.id===b.machineId);return <span key={b.id}>{machineDisplayName(machine||{})} · {b.period==="full_day"?"Full day":b.period.toUpperCase()}</span>})}</div>}
 
@@ -2500,7 +2719,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
                         <p className="time-total"><Clock size={14}/> Total running time: {formatDuration(getWorkerTotalMs(job, worker.id))}</p>
 
                         <div className="employee-card-tabs">
-                          <details open><summary>Job description</summary><pre>{job.notes}</pre></details>
+                          <details open><summary>Job description</summary><pre>{job.notes}</pre></details><details><summary>Job notes</summary>{(job.noteHistory||[]).filter(n=>n.showInTradeView).map(n=><div key={n.id} className="trade-note"><strong>{n.user}</strong><span>{formatDateTime(n.date)}</span><p>{n.text}</p></div>)}{!(job.noteHistory||[]).some(n=>n.showInTradeView)&&<p>No notes shared with Trade View.</p>}</details>
                           <details><summary>Materials list</summary>{(job.materials || []).map(m => <p key={m.id}>• {m.text}</p>)}{!(job.materials || []).length && <p>No materials listed.</p>}</details>
                           <details><summary>Photos</summary><div className="photo-upload-row"><label className="secondary file-pick">Upload photos<input type="file" accept="image/*" multiple onChange={e => onAddAttachment(job.id, worker.id, e.target.files || [])}/></label><label className="secondary file-pick">Camera<input type="file" accept="image/*" capture="environment" onChange={e => onAddAttachment(job.id, worker.id, e.target.files || [])}/></label></div><div className="simple-list">{(job.attachments || []).map(a => <div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={() => openStoredAttachment(a)}><Download size={14}/> Open</button></div>)}{!(job.attachments || []).length && <p>No photos/files added.</p>}</div></details>
                           <details open={completionFor === job.id}><summary onClick={() => setCompletionFor(completionFor === job.id ? null : job.id)}>Job completion</summary><label>Description of works<textarea rows="4" value={completion.completionDescription || ""} onChange={e => updateCompletionDraft(job.id, "completionDescription", e.target.value)} placeholder="Describe the works completed..."/></label><label>Approximate materials used<textarea rows="3" value={completion.materialsUsed || ""} onChange={e => updateCompletionDraft(job.id, "materialsUsed", e.target.value)} placeholder="List approximate materials used..."/></label><label className="check-option plain"><input type="checkbox" checked={Boolean(completion.requiresAnotherTrade)} onChange={e => updateCompletionDraft(job.id, "requiresAnotherTrade", e.target.checked)}/>Notify supervisors that this portion is complete but another trade is required</label>{completion.requiresAnotherTrade && <label>Trade required<select value={completion.followUpTrade || ""} onChange={e => updateCompletionDraft(job.id, "followUpTrade", e.target.value)}><option value="">Select trade</option>{TRADES.map(t => <option key={t}>{t}</option>)}</select></label>}<p className="muted">Use the Save update button below to save completion details.</p></details>
@@ -2787,7 +3006,7 @@ function mapJobFromSupabase(row, bookingRows = []) {
     jobValue: "",
     notes: row.description || payload.notes || "",
     category: row.category || payload.category || "To be scheduled",
-    materialsStatus: row.materials_status || payload.materialsStatus || "Not checked",
+    materialsStatus: row.materials_status || payload.materialsStatus || "Parts from stock",
     clientContact: row.client_contact || "",
     clientPhone: row.client_phone || "",
     appointmentSent: Boolean(row.appointment_sent),
@@ -2889,7 +3108,7 @@ function mapJobToSupabase(job) {
     po_number: job.poNumber || null,
     description: job.notes || null,
     category: job.category || "To be scheduled",
-    materials_status: job.materialsStatus || "Not checked",
+    materials_status: job.materialsStatus || "Parts from stock",
     client_contact: job.clientContact || null,
     client_phone: job.clientPhone || null,
     appointment_sent: Boolean(job.appointmentSent),
@@ -3161,24 +3380,156 @@ async function fetchJobsFromSupabase() {
   if (bookingError) throw bookingError;
   const jobIds = (jobRows || []).map(row => row.id).filter(isUuid);
   let attachmentsByJob = {};
+  let notesByJob = {};
+  let historyByJob = {};
+  let completionSubmissionsByJob = {};
+  let workerNames = {};
   if (jobIds.length) {
-    const { data: attachmentRows, error: attachmentError } = await supabase
-      .from("attachments")
-      .select("*")
-      .in("job_id", jobIds)
-      .order("created_at", { ascending: false });
-    if (attachmentError && attachmentError.code !== "42P01") throw attachmentError;
-    attachmentsByJob = (attachmentRows || []).reduce((acc, row) => {
+    const [attachmentResult, noteResult, historyResult, completionResult, workerResult] = await Promise.all([
+      supabase.from("attachments").select("*").in("job_id", jobIds).order("created_at", { ascending: false }),
+      supabase.from("job_notes").select("id,job_id,worker_id,note_text,note_type,visit_id,show_in_trade_view,created_by,created_at").in("job_id", jobIds).order("created_at", { ascending: false }),
+      supabase.from("job_history").select("id,job_id,action,details,created_by,created_at").in("job_id", jobIds).order("created_at", { ascending: false }),
+      supabase.from("job_completion_submissions").select("*").in("job_id", jobIds).order("submitted_at", { ascending: false }),
+      supabase.from("workers").select("id,name")
+    ]);
+
+    if (attachmentResult.error && attachmentResult.error.code !== "42P01") throw attachmentResult.error;
+    if (noteResult.error && noteResult.error.code !== "42P01" && noteResult.error.code !== "42703") throw noteResult.error;
+    if (historyResult.error && historyResult.error.code !== "42P01") throw historyResult.error;
+    if (completionResult.error && completionResult.error.code !== "42P01") throw completionResult.error;
+    if (workerResult.error) throw workerResult.error;
+
+    workerNames = Object.fromEntries((workerResult.data || []).map(worker => [worker.id, worker.name || "Employee"]));
+    attachmentsByJob = (attachmentResult.data || []).reduce((acc, row) => {
       const item = mapAttachmentFromSupabase(row);
       acc[row.job_id] = [...(acc[row.job_id] || []), item];
       return acc;
     }, {});
+    notesByJob = (noteResult.data || []).reduce((acc, row) => {
+      acc[row.job_id] = [...(acc[row.job_id] || []), row];
+      return acc;
+    }, {});
+    historyByJob = (historyResult.data || []).reduce((acc, row) => {
+      acc[row.job_id] = [...(acc[row.job_id] || []), row];
+      return acc;
+    }, {});
+    completionSubmissionsByJob = (completionResult.data || []).reduce((acc, row) => {
+      acc[row.job_id] = [...(acc[row.job_id] || []), row];
+      return acc;
+    }, {});
   }
   return (jobRows || []).map(row => {
-    const job = mapJobFromSupabase(row, bookingRows || []);
+    let job = mapJobFromSupabase(row, bookingRows || []);
     const storedAttachments = attachmentsByJob[row.id] || [];
-    return normaliseJob({ ...job, attachments: mergeAttachments(storedAttachments, job.attachments || []) });
+    const remoteNotes = notesByJob[row.id] || [];
+    const remoteHistory = historyByJob[row.id] || [];
+    const completionSubmissions = completionSubmissionsByJob[row.id] || [];
+    const currentVisitId = getCurrentVisitId(job);
+    const currentVisitStartedAt = job.currentVisitStartedAt ? new Date(job.currentVisitStartedAt).getTime() : 0;
+
+    const noteHistory = remoteNotes.map(note => ({
+      id: note.id,
+      date: note.created_at || new Date().toISOString(),
+      user: workerNames[note.worker_id] || (note.worker_id ? "Employee" : "Admin"),
+      workerId: note.worker_id || "",
+      text: note.note_text || "",
+      noteType: note.note_type || "general",
+      visitId: note.visit_id || "",
+      showInTradeView: Boolean(note.show_in_trade_view)
+    }));
+    const jobHistory = remoteHistory.map(item => ({
+      id: item.id,
+      date: item.created_at || new Date().toISOString(),
+      user: "System",
+      action: item.action || "Update",
+      details: item.details || ""
+    }));
+
+    // Completion submissions are stored in a dedicated ledger. This avoids
+    // relying on the jobs JSON payload or on the order in which an employee
+    // presses Save update and Complete. Only the active visit is exposed as
+    // the current completion in Admin and Trade Views.
+    const workerCompletions = {};
+    completionSubmissions.forEach(submission => {
+      const submissionVisitId = submission.visit_id || "original";
+      const activeVisitId = currentVisitId || "original";
+      if (!submission.worker_id || submissionVisitId !== activeVisitId) return;
+      if (workerCompletions[submission.worker_id]) return;
+      workerCompletions[submission.worker_id] = {
+        submissionId: submission.id,
+        visitId: currentVisitId || null,
+        submittedComplete: true,
+        completionDescription: submission.completion_description || "",
+        materialsUsed: submission.materials_used || "",
+        requiresAnotherTrade: Boolean(submission.requires_another_trade),
+        followUpTrade: submission.follow_up_trade || "",
+        updatedAt: submission.submitted_at || submission.updated_at || new Date().toISOString(),
+        updatedBy: workerNames[submission.worker_id] || "Employee"
+      };
+    });
+
+    // Backward compatibility for updates saved before the dedicated ledger
+    // was introduced. A note counts only when it belongs to the active visit.
+    remoteNotes.forEach(note => {
+      if (!note.worker_id || !["completion", "completion_follow_up"].includes(note.note_type)) return;
+      if (workerCompletions[note.worker_id]) return;
+      const noteTime = note.created_at ? new Date(note.created_at).getTime() : 0;
+      const activeVisitId = currentVisitId || "original";
+      const noteVisitId = note.visit_id || "original";
+      const belongsToCurrentVisit = noteVisitId === activeVisitId ||
+        (!note.visit_id && currentVisitId && noteTime >= currentVisitStartedAt);
+      if (!belongsToCurrentVisit) return;
+      workerCompletions[note.worker_id] = {
+        submissionId: `legacy-note-${note.id}`,
+        visitId: currentVisitId || null,
+        submittedComplete: true,
+        completionDescription: note.note_text || "Completion update submitted.",
+        materialsUsed: "",
+        requiresAnotherTrade: note.note_type === "completion_follow_up",
+        followUpTrade: "",
+        updatedAt: note.created_at || new Date().toISOString(),
+        updatedBy: workerNames[note.worker_id] || "Employee"
+      };
+    });
+
+    // Put employee completion submissions into the Admin Notes history as
+    // explicit entries, even if the legacy job_notes insert was blocked.
+    const completionNotes = completionSubmissions.map(submission => {
+      const parts = [
+        submission.completion_description ? `Works: ${submission.completion_description}` : "",
+        submission.materials_used ? `Materials: ${submission.materials_used}` : "",
+        submission.requires_another_trade ? `Another trade required${submission.follow_up_trade ? `: ${submission.follow_up_trade}` : ""}` : ""
+      ].filter(Boolean);
+      return {
+        id: `completion-${submission.id}`,
+        date: submission.submitted_at || submission.updated_at || new Date().toISOString(),
+        user: workerNames[submission.worker_id] || "Employee",
+        workerId: submission.worker_id || "",
+        text: parts.join("\n") || "Completion update submitted.",
+        noteType: submission.requires_another_trade ? "completion_follow_up" : "completion",
+        visitId: submission.visit_id || ""
+      };
+    });
+    job = {
+      ...job,
+      attachments: mergeAttachments(storedAttachments, job.attachments || []),
+      noteHistory: mergeHistoryEntries([...completionNotes, ...noteHistory], job.noteHistory || []),
+      jobHistory: mergeHistoryEntries(jobHistory, job.jobHistory || []),
+      workerCompletions
+    };
+    return normaliseJob(job);
   });
+}
+
+function mergeHistoryEntries(primary = [], secondary = []) {
+  const seen = new Set();
+  return [...primary, ...secondary].filter(item => {
+    if (!item) return false;
+    const key = item.id || `${item.date || ""}:${item.user || ""}:${item.text || item.action || ""}:${item.details || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => new Date(b.date || 0) - new Date(a.date || 0));
 }
 
 async function persistJobToSupabase(job) {
@@ -3231,13 +3582,41 @@ async function deleteJobFromSupabase(jobId) {
   if (error) throw error;
 }
 
-async function insertJobNoteToSupabase({ jobId, workerId, noteText, noteType = "general", createdBy = null }) {
+async function upsertCompletionSubmissionToSupabase({ jobId, workerId, visitId = "original", completion, createdBy = null }) {
+  if (!supabase || !isUuid(jobId) || !isUuid(workerId)) {
+    throw new Error("A valid job and employee are required to save a completion update.");
+  }
+  const now = new Date().toISOString();
+  const row = {
+    job_id: jobId,
+    worker_id: workerId,
+    visit_id: visitId || "original",
+    completion_description: completion?.completionDescription || "",
+    materials_used: completion?.materialsUsed || "",
+    requires_another_trade: Boolean(completion?.requiresAnotherTrade),
+    follow_up_trade: completion?.followUpTrade || null,
+    submitted_by: isUuid(createdBy) ? createdBy : null,
+    submitted_at: now,
+    updated_at: now
+  };
+  const { data, error } = await supabase
+    .from("job_completion_submissions")
+    .upsert(row, { onConflict: "job_id,visit_id,worker_id" })
+    .select("id")
+    .single();
+  if (error) throw error;
+  return data;
+}
+
+async function insertJobNoteToSupabase({ jobId, workerId, noteText, noteType = "general", visitId = null, showInTradeView = false, createdBy = null }) {
   if (!supabase || !isUuid(jobId) || !noteText) return;
   const row = {
     job_id: jobId,
     worker_id: isUuid(workerId) ? workerId : null,
     note_text: noteText,
     note_type: noteType,
+    visit_id: visitId || null,
+    show_in_trade_view: Boolean(showInTradeView),
     created_by: isUuid(createdBy) ? createdBy : null
   };
   const { error } = await supabase.from("job_notes").insert(row);
@@ -3257,8 +3636,77 @@ async function insertJobHistoryToSupabase({ jobId, action, details = "", created
 }
 
 
-function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
-function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Not checked",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},priorVisits:[],currentVisitId:"",currentVisitStartedAt:"",completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],priorVisits:Array.isArray(job.priorVisits)?job.priorVisits:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
+async function fetchToolsFromSupabase() {
+  if (!supabase) return [];
+  const { data, error } = await supabase.from("tools").select("*").order("description");
+  if (error) { if (["42P01","42501"].includes(error.code)) return []; throw error; }
+  return (data||[]).map(row=>({id:row.id,description:row.description||"",toolId:row.tool_id||"",serialNumber:row.serial_number||"",brandModel:row.brand_model||"",status:row.status||"available",assignedWorkerId:row.assigned_worker_id||"",signedOutAt:row.signed_out_at||"",notes:row.notes||"",purchaseDate:row.purchase_date||"",active:row.active!==false,persisted:true}));
+}
+async function fetchToolHistoryFromSupabase() {
+  if (!supabase) return [];
+  const { data, error } = await supabase.from("tool_transactions").select("*,tools(description,tool_id)").order("created_at",{ascending:false}).limit(500);
+  if (error) { if (["42P01","42501"].includes(error.code)) return []; throw error; }
+  return (data||[]).map(row=>({id:row.id,toolId:row.tool_id,toolDescription:row.tools?.description||row.tools?.tool_id||"Tool",action:row.action,workerId:row.worker_id||"",fromWorkerId:row.from_worker_id||"",reason:row.reason||"",createdAt:row.created_at}));
+}
+async function saveToolToSupabase(tool) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+  const description = String(tool.description || "").trim();
+  const toolCode = String(tool.toolId || "").trim();
+  if (!description) throw new Error("Tool description is required.");
+  if (!toolCode) throw new Error("Tool ID is required.");
+
+  const row = {
+    id: tool.id,
+    description,
+    tool_id: toolCode,
+    serial_number: String(tool.serialNumber || "").trim() || null,
+    brand_model: String(tool.brandModel || "").trim() || null,
+    status: tool.assignedWorkerId && tool.status === "available" ? "signed_out" : (tool.status || "available"),
+    assigned_worker_id: tool.assignedWorkerId || null,
+    signed_out_at: tool.assignedWorkerId ? (tool.signedOutAt || new Date().toISOString()) : null,
+    notes: String(tool.notes || "").trim() || null,
+    purchase_date: tool.purchaseDate || null,
+    active: tool.active !== false && tool.status !== "inactive",
+    updated_at: new Date().toISOString()
+  };
+
+  const query = tool.persisted
+    ? supabase.from("tools").update(row).eq("id", tool.id)
+    : supabase.from("tools").insert(row);
+  const { data: saved, error } = await query.select("*").single();
+  if (error) throw error;
+  if (!saved?.id) throw new Error("Supabase did not return the saved tool. The tool was not confirmed as stored.");
+
+  const { error: historyError } = await supabase.from("tool_transactions").insert({
+    tool_id: saved.id,
+    action: tool.persisted ? "updated" : "created",
+    worker_id: saved.assigned_worker_id || null,
+    reason: tool.persisted ? "Tool details updated" : "Tool added to register"
+  });
+  if (historyError) console.warn("Tool saved, but history entry failed", historyError);
+  return saved;
+}
+async function deleteToolFromSupabase(toolId) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+  const { error: historyError } = await supabase.from("tool_transactions").delete().eq("tool_id", toolId);
+  if (historyError) throw historyError;
+  const { error } = await supabase.from("tools").delete().eq("id", toolId);
+  if (error) throw error;
+}
+
+async function saveToolActionToSupabase({tool,action,workerId,reason}) {
+  if (!supabase) throw new Error("Supabase is not configured.");
+  let patch={updated_at:new Date().toISOString()};
+  if(action==="sign_out") patch={...patch,status:"signed_out",assigned_worker_id:workerId,signed_out_at:new Date().toISOString()};
+  if(action==="return") patch={...patch,status:"available",assigned_worker_id:null,signed_out_at:null};
+  if(action==="out_of_service") patch={...patch,status:"out_of_service"};
+  if(action==="return_to_service") patch={...patch,status:"available",assigned_worker_id:null,signed_out_at:null};
+  const {error}=await supabase.from("tools").update(patch).eq("id",tool.id); if(error)throw error;
+  const {error:historyError}=await supabase.from("tool_transactions").insert({tool_id:tool.id,action,worker_id:workerId||tool.assignedWorkerId||null,from_worker_id:tool.assignedWorkerId||null,reason:reason||null}); if(historyError)throw historyError;
+}
+
+function emptyJob(){ return normaliseJob({id:createId(),title:"",client:"",site:"",requiredTrade:"",requiredTrades:[],materialsStatus:"Parts from stock",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",address:"",clientContact:"",clientPhone:"",category:"To be scheduled",assignedTo:[],startDate:"",endDate:"",notes:"",materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},scheduleBlocks:[],safetyPermits:[]}); }
+function normaliseJob(job){ const trades = Array.isArray(job.requiredTrades) && job.requiredTrades.length ? job.requiredTrades : (job.requiredTrade ? [job.requiredTrade] : []); const blocks = Array.isArray(job.scheduleBlocks) ? job.scheduleBlocks.map(b=>({id:b.id||createId(),workerId:b.workerId||"",startDate:b.startDate||"",endDate:b.endDate||b.startDate||""})).filter(b=>b.workerId&&b.startDate&&b.endDate) : []; return {client:"",site:"",requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,materialsStatus:"Parts from stock",jobNumber:"",quoteNumber:"",workOrderNumber:"",poNumber:"",jobValue:"",clientPhone:"",appointmentSent:false,clientAccepted:false,isAdHoc:false,isTravelComment:false,materials:[],attachments:[],noteHistory:[],jobHistory:[],workerStatus:{},workerCompletions:{},priorVisits:[],currentVisitId:"",currentVisitStartedAt:"",completedConfirmed:false,isDefectCallback:false,jobStatus:job.category||"To be scheduled",scheduleBlocks:[],machineryBookings:[],safetyPermits:[],...job,requiredTrade:trades[0]||job.requiredTrade||"",requiredTrades:trades,assignedTo:Array.isArray(job.assignedTo)?job.assignedTo:[],scheduleBlocks:blocks,machineryBookings:Array.isArray(job.machineryBookings)?job.machineryBookings:[],priorVisits:Array.isArray(job.priorVisits)?job.priorVisits:[],safetyPermits:normaliseSafetyPermits(job.safetyPermits),jobStatus:job.jobStatus || (job.isDefectCallback ? "Call back - Defects" : job.category || "To be scheduled"), isDefectCallback:Boolean(job.isDefectCallback || job.jobStatus === "Call back - Defects"), endDate:job.endDate||job.startDate||""}; }
 function createId(){ return globalThis.crypto?.randomUUID ? globalThis.crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`; }
 function loadData(){ try{const saved=localStorage.getItem(STORAGE_KEY); if(!saved) return initialData; const parsed=JSON.parse(saved); return {...initialData,...parsed,teamMembers:(parsed.teamMembers||[]).map(w=>({birthday:"",sapNumber:w.employeeNumber||"",inactive:false,accessRevoked:false,customWorkStart:"",customWorkEnd:"",customRnrStart:"",customRnrEnd:"",customRepeatUntil:"",...w})),jobs:(parsed.jobs||[]).map(normaliseJob),leaveRecords:parsed.leaveRecords||[],messages:parsed.messages||[]};}catch{return initialData;} }
 function saveData(data){ localStorage.setItem(STORAGE_KEY, JSON.stringify(data)); }
@@ -3572,11 +4020,16 @@ function getWorkerAvailability(worker, iso, leaveRecords = []) {
 
 function effectiveMaterialsStatus(job) {
   const status = String(job?.materialsStatus || "").trim();
-  return !status || status === "Not checked" ? "Not required" : status;
+  const legacyMap = { "Not checked": "No parts required", "Not required": "No parts required", "Required": "Awaiting supplier quote", "Ready": "All parts arrived" };
+  return legacyMap[status] || status || "Parts from stock";
 }
 
 function isAwaitingMaterials(job) {
-  return ["Required", "Ordered", "Partially arrived"].includes(effectiveMaterialsStatus(job));
+  return ["Awaiting supplier quote", "Ordered", "Partially arrived"].includes(effectiveMaterialsStatus(job));
+}
+
+function isMaterialsReady(job) {
+  return ["No parts required", "Parts from stock", "All parts arrived"].includes(effectiveMaterialsStatus(job));
 }
 
 function getReadiness(job) {
@@ -3587,6 +4040,7 @@ function getReadiness(job) {
   if (!job.client) missing.push("client");
   if (!job.address && !job.site) missing.push("address/site");
   // Blank or Not checked materials status is treated as materials N/A.
+  if (isAwaitingMaterials(job)) missing.push(`materials: ${effectiveMaterialsStatus(job)}`);
   if (hasOutstandingSafetyPermits(job)) missing.push("safety/permits organised");
 
   return {

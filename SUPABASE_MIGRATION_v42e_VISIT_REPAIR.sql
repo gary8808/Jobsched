@@ -28,8 +28,24 @@ drop policy if exists "Admins manage job visit history" on public.job_visit_hist
 create policy "Admins manage job visit history"
 on public.job_visit_history
 for all to authenticated
-using (public.is_admin())
-with check (public.is_admin());
+using (
+  exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+      and coalesce(p.active, true)
+  )
+)
+with check (
+  exists (
+    select 1
+    from public.profiles p
+    where p.id = auth.uid()
+      and p.role = 'admin'
+      and coalesce(p.active, true)
+  )
+);
 
 -- Archive the currently-carried completion/time for defects jobs before resetting it.
 insert into public.job_visit_history (

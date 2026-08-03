@@ -1693,3 +1693,103 @@ label textarea {
   font-weight: 800;
   letter-spacing: 0.04em;
 }
+
+/* AIM CG v43 */
+.note-entry-stacked{display:grid;gap:10px}.compact-check{margin-top:6px}.trade-note{border-left:3px solid #c62828;padding:8px 10px;margin:8px 0;background:#fff7f7}.trade-note span{display:block;font-size:.78rem;color:#667}.tool-register-modal{width:min(1180px,96vw);max-height:92vh;overflow:auto}.tool-register-actions{display:flex;gap:12px;align-items:center;margin-bottom:14px}.tool-register-actions .search{flex:1}.tool-table-wrap{overflow:auto;border:1px solid #ddd;border-radius:10px}.tool-table{width:100%;border-collapse:collapse;min-width:900px}.tool-table th,.tool-table td{padding:10px;border-bottom:1px solid #eee;text-align:left;vertical-align:top}.tool-table td small{display:block;color:#667;margin-top:3px}.tool-row-actions{display:flex;gap:6px;flex-wrap:wrap}.tool-status{text-transform:capitalize;font-weight:700;padding:4px 8px;border-radius:999px;background:#eee}.tool-status.available{background:#e7f6ea;color:#176b2c}.tool-status.signed_out{background:#fff0cf;color:#895d00}.tool-status.out_of_service,.tool-status.lost{background:#fde2e2;color:#9a1c1c}.tool-history-panel{margin-top:16px}.tool-history-row{padding:9px;border-bottom:1px solid #eee}.nested-modal{position:fixed;inset:0;background:rgba(0,0,0,.28);display:grid;place-items:center;z-index:2000}.danger{color:#a51b1b}@media(max-width:760px){.tool-register-actions{align-items:stretch;flex-direction:column}.tool-register-actions>*{width:100%}.tool-register-modal{width:100vw;max-height:100vh;border-radius:0}.settings-action-list .choice-card{min-height:auto}}
+
+/* v43a: full-page Tool Register */
+.tool-register-page {
+  min-height: calc(100vh - 76px);
+  padding: 18px 22px 40px;
+  margin-left: 64px;
+  background: #f5f6f7;
+}
+.tool-register-shell {
+  width: 100%;
+  max-width: 1800px;
+  margin: 0 auto;
+  background: #fff;
+  border: 1px solid #dfe3e7;
+  border-radius: 14px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.06);
+  padding: 20px;
+}
+.tool-register-page-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+.tool-register-page-header h1 { margin: 0 0 4px; font-size: 1.55rem; }
+.tool-register-page-header p { margin: 0; color: #66707a; }
+.tool-register-page .tool-table-wrap { max-height: none; overflow: auto; }
+.tool-register-page .tool-table { min-width: 920px; }
+.tool-register-page .tool-history-panel { margin-top: 18px; }
+@media (max-width: 760px) {
+  .tool-register-page { margin-left: 52px; padding: 10px 8px 28px; }
+  .tool-register-shell { padding: 12px; border-radius: 10px; }
+  .tool-register-page-header { align-items: center; }
+  .tool-register-page-header h1 { font-size: 1.25rem; }
+}
+
+/* AIM CG v43d: mobile-first tool register and tool detail view */
+.tool-register-page { margin-left: 0; width: 100%; box-sizing: border-box; }
+.tool-name-link {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  color: #8d1f18;
+  font: inherit;
+  font-weight: 900;
+  text-align: left;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.tool-name-link:hover { color: #b42318; }
+.mobile-tool-list { display: none; }
+.mobile-tool-card {
+  border: 1px solid #dfe3e7;
+  border-radius: 14px;
+  padding: 14px;
+  background: #fff;
+  box-shadow: 0 3px 12px rgba(0,0,0,.045);
+}
+.mobile-tool-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.mobile-tool-card-head > div { display: grid; gap: 4px; min-width: 0; }
+.mobile-tool-card-head > div > span { color: #66707a; font-size: .82rem; font-weight: 800; }
+.mobile-tool-card dl { display: grid; gap: 8px; margin: 13px 0; }
+.mobile-tool-card dl > div { display: grid; grid-template-columns: 88px minmax(0,1fr); gap: 8px; }
+.mobile-tool-card dt { color: #66707a; font-size: .78rem; font-weight: 800; }
+.mobile-tool-card dd { margin: 0; font-size: .88rem; overflow-wrap: anywhere; }
+.tool-detail-modal { width: min(720px, 96vw); max-height: 92vh; overflow: auto; }
+.tool-detail-tabs { display: flex; gap: 6px; border-bottom: 1px solid #e1e5e9; padding: 0 18px; }
+.tool-detail-tabs button { border: 0; background: transparent; padding: 12px 13px; font-weight: 900; color: #59636f; border-bottom: 3px solid transparent; }
+.tool-detail-tabs button.active { color: #9f211a; border-bottom-color: #c62828; }
+.tool-detail-tabs button span { display: inline-grid; place-items: center; min-width: 21px; height: 21px; margin-left: 5px; border-radius: 999px; background: #eef1f4; font-size: .72rem; }
+.tool-detail-body, .tool-detail-history { padding: 16px 18px; }
+.tool-detail-body { display: grid; gap: 12px; }
+.tool-detail-history { max-height: 56vh; overflow: auto; }
+.tool-detail-actions { position: sticky; bottom: 0; background: #fff; border-top: 1px solid #e1e5e9; padding: 12px 18px; }
+.modal-action-spacer { flex: 1; }
+.tool-status.inactive { background: #e9eaec; color: #4d5660; }
+
+@media (max-width: 760px) {
+  .tool-register-page { margin-left: 0; padding: 8px 6px 24px; min-width: 0; }
+  .tool-register-shell { padding: 10px; border-radius: 9px; min-width: 0; }
+  .tool-register-page-header { align-items: flex-start; }
+  .tool-register-page-header p { font-size: .82rem; }
+  .desktop-tool-table { display: none; }
+  .mobile-tool-list { display: grid; gap: 10px; }
+  .tool-register-actions { gap: 8px; }
+  .tool-row-actions { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); width: 100%; }
+  .tool-row-actions button { width: 100%; min-height: 38px; }
+  .tool-detail-modal { width: 100vw; height: 100dvh; max-height: 100dvh; border-radius: 0; }
+  .tool-detail-body .two-col { grid-template-columns: 1fr; }
+  .tool-detail-actions { flex-wrap: wrap; }
+  .tool-detail-actions .modal-action-spacer { display: none; }
+  .tool-detail-actions button { flex: 1 1 45%; }
+}
