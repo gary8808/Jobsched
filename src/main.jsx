@@ -134,6 +134,7 @@ function App() {
   const machineryRefreshSequence = useRef(0);
   const toolRefreshSequence = useRef(0);
   const inventoryRefreshSequence = useRef(0);
+  const jobPackProcessorBusy = useRef(false);
   dataRef.current = data;
   const [view, setView] = useState("admin");
   const [adminTab, setAdminTab] = useState("schedule");
@@ -774,6 +775,53 @@ function App() {
 
   const inventoryBalances = useMemo(() => calculateInventoryBalances(inventoryItems, inventoryMovements), [inventoryItems, inventoryMovements]);
   const lowStockCount = inventoryItems.filter(item => item.active !== false && (inventoryBalances[item.id] || 0) <= Number(item.minimumQuantity || 0)).length;
+
+  useEffect(() => {
+    if (!session || !supabase || !isAdminUser) return;
+    let alive = true;
+    let timer = null;
+
+    async function processPendingImports() {
+      if (!alive || jobPackProcessorBusy.current) return;
+      jobPackProcessorBusy.current = true;
+      try {
+        const { data: pending, error } = await supabase
+          .from("job_pack_imports")
+          .select("*")
+          .eq("import_status", "pending")
+          .order("received_at", { ascending: true })
+          .limit(3);
+        if (error) throw error;
+        for (const row of pending || []) {
+          if (!alive) break;
+          await processJobPackImport(row, { silent: true });
+        }
+      } catch (error) {
+        console.warn("Could not process pending Tradify job packs", error);
+      } finally {
+        jobPackProcessorBusy.current = false;
+      }
+    }
+
+    processPendingImports();
+    timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") processPendingImports();
+    }, 30000);
+
+    const channel = supabase
+      .channel(uniqueRealtimeTopic(`aimcg-job-pack-processor-${session.user.id}`))
+      .on("postgres_changes", { event: "INSERT", schema: "public", table: "job_pack_imports" }, processPendingImports)
+      .subscribe((status, error) => logRealtimeStatus("Job-pack processor", status, error));
+
+    const onFocus = () => processPendingImports();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      alive = false;
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      supabase.removeChannel(channel);
+    };
+  }, [session?.user?.id, isAdminUser]);
 
   useEffect(() => {
     if (!session || !supabase || !hasStoresPermission) return;
@@ -2703,9 +2751,9 @@ function FastFieldCloseoutsPage({jobs,onClose}){
 
 function JobPackImportsPage({onClose}){
   const [rows,setRows]=useState([]);const [query,setQuery]=useState("");const [working,setWorking]=useState("");
-  async function load(auto=true){const {data,error}=await supabase.from("job_pack_imports").select("*").order("received_at",{ascending:false});if(error){alert(error.message);return;}const loaded=data||[];setRows(loaded);if(auto){for(const row of loaded.filter(r=>["pending","parse_failed"].includes(r.import_status)).slice(0,5))await process(row,true);}}
+  async function load(auto=true){const {data,error}=await supabase.from("job_pack_imports").select("*").order("received_at",{ascending:false});if(error){alert(error.message);return;}const loaded=data||[];setRows(loaded);if(auto){for(const row of loaded.filter(r=>r.import_status==="pending").slice(0,5))await process(row,true);}}
   useEffect(()=>{load();},[]);
-  async function process(row,silent=false){setWorking(row.id);try{await supabase.from("job_pack_imports").update({processing_status:"parsing",updated_at:new Date().toISOString()}).eq("id",row.id);const file=await downloadPrivatePdf(row.storage_bucket,row.storage_object_path);const text=await extractTextFromPdf(file);const parsed=parseAimJobSheet(text);if(!parsed.title)throw new Error("Reference/job title could not be extracted from the fixed job-pack layout.");if(!parsed.jobNumber&&!parsed.workOrderNumber)throw new Error("Job number or work order could not be extracted.");const {error:updateError}=await supabase.from("job_pack_imports").update({parsed_fields:parsed,processing_status:"parsed",import_status:"parsed",parsed_at:new Date().toISOString(),updated_at:new Date().toISOString(),error_message:null}).eq("id",row.id);if(updateError)throw updateError;const {error:importError}=await supabase.rpc("aimcg_create_job_from_pack",{p_import_id:row.id});if(importError)throw importError;await load(false);}catch(error){await supabase.from("job_pack_imports").update({processing_status:"review_required",import_status:"parse_failed",error_message:error.message,updated_at:new Date().toISOString()}).eq("id",row.id);if(!silent)alert(error.message);await load(false);}finally{setWorking("");}}
+  async function process(row,silent=false){setWorking(row.id);try{await processJobPackImport(row,{silent});await load(false);}catch(error){if(!silent)alert(error.message);await load(false);}finally{setWorking("");}}
   async function openPdf(row){const {data,error}=await supabase.storage.from(row.storage_bucket).createSignedUrl(row.storage_object_path,120);if(error){alert(error.message);return;}window.open(data.signedUrl,"_blank","noopener,noreferrer");}
   const q=query.trim().toLowerCase();const visible=rows.filter(r=>!q||[r.original_file_name,r.import_status,JSON.stringify(r.parsed_fields||{})].join(" ").toLowerCase().includes(q));
   return <main className="reports-page"><section className="reports-page-shell"><div className="inventory-header"><div><h1><FolderInput size={28}/> Tradify job-pack imports</h1><p>Power Automate uploads PDFs from the shared OneDrive/SharePoint folder. Valid packs create draft jobs directly in To be scheduled.</p></div><div className="report-actions"><button className="secondary" onClick={()=>load()}><RotateCcw size={15}/> Refresh and import</button><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div></div><div className="search closeout-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search file, job number, work order or status…"/></div><div className="closeout-summary"><span>{rows.filter(r=>r.import_status==="imported").length} imported</span><span>{rows.filter(r=>r.import_status==="pending").length} pending</span><span>{rows.filter(r=>["parse_failed","duplicate_existing_job"].includes(r.import_status)).length} need review</span></div><div className="closeout-list">{visible.map(r=>{const f=r.parsed_fields||{};return <article className={`closeout-row ${r.import_status==="parse_failed"?"warning":""}`} key={r.id}><div><strong>{f.jobNumber?`Job ${f.jobNumber}`:"Job pending"} · WO {f.workOrderNumber||"pending"}</strong><span>{f.title||r.original_file_name}</span><em>Received {formatDateTime(r.received_at)}</em><small>Status: {r.import_status} / {r.processing_status}{r.error_message?` · ${r.error_message}`:""}</small></div><div className="closeout-actions"><button className="secondary" onClick={()=>openPdf(r)}><Download size={14}/> PDF</button>{r.import_status!=="imported"&&<button className="primary" disabled={working===r.id} onClick={()=>process(r)}>{working===r.id?"Importing…":"Parse and import"}</button>}</div></article>})}{!visible.length&&<div className="empty">No job packs received.</div>}</div></section></main>;
@@ -4717,7 +4765,65 @@ function fileToAttachment(file, label = "Attachment") {
 }
 
 async function extractTextFromPdf(file){ const buffer=await file.arrayBuffer(); const pdf=await pdfjsLib.getDocument({data:buffer}).promise; const pages=[]; for(let i=1;i<=pdf.numPages;i++){const page=await pdf.getPage(i); const content=await page.getTextContent(); pages.push(content.items.map(item=>item.str).join("\n"));} return pages.join("\n\n"); }
-function parseAimJobSheet(text){ const compact=text.replace(/\r/g,"\n").replace(/[ \t]+/g," ").replace(/\n+/g,"\n").trim(); const client=extractClient(compact); const address=cleanMultiline(extractBetween(compact,"Job Address","Reference")); const reference=cleanMultiline(extractBetween(compact,"Reference","Job Number")).replace(/, /g," "); const jobNumber=normaliseCode(matchFirst(compact,/Job Number\s+([A-Z]{0,4}\s*\d{3,})/i)||matchFirst(compact,/\b(JB\s*\d{3,})\b/i)); const quoteNumber=normaliseCode(matchFirst(compact,/\b(QUO\s*\d+)\b/i)); const workOrderNumber=normaliseCode(matchFirst(compact,/\b(WO\s*\d+)\b/i)||matchFirst(compact,/\b(WO\d+)\b/i)); const poNumber=normaliseCode(matchFirst(compact,/\b(PO\s*[A-Z]?\d+)\b/i)); return {title:reference,address,client,clientContact:client,site:guessSiteFromText(address),jobNumber,quoteNumber,workOrderNumber,poNumber,notes:extractScope(compact)}; }
+function parseAimJobSheet(text){
+  const compact=String(text||"").replace(/\r/g,"\n").replace(/[ \t]+/g," ").replace(/\n{2,}/g,"\n").trim();
+  const oneLine=compact.replace(/\s+/g," ");
+  const labelled=(label,nextLabels=[])=>pdfFieldBetween(oneLine,label,nextLabels);
+  const reference=cleanMultiline(labelled("Reference",["Job Number","Scope of Work","Notes"])).replace(/, /g," ");
+  const address=cleanMultiline(labelled("Job Address",["Reference","Job Number"]));
+  const site=cleanPdfField(labelled("Site",["Job Address","Reference"]));
+  const clientBlock=cleanMultiline(labelled("Job Sheet",["Site","Job Address"])
+    .replace(/\b\d{1,2}\s+[A-Za-z]+\s+\d{4}\b/g,"")
+    .replace(/\bJob Number\b.*$/i,""));
+  const jobNumber=normaliseCode(
+    matchFirst(oneLine,/Job Number\s*[:#-]?\s*([A-Z]{0,4}\s*\d{3,})/i)
+    ||matchFirst(oneLine,/\b(JB?\s*\d{3,})\b/i)
+  );
+  const quoteNumber=normaliseCode(matchFirst(oneLine,/\b(QUO\s*\d+)\b/i));
+  const workOrderNumber=normaliseCode(
+    matchFirst(oneLine,/Work Order(?: Number)?\s*[:#-]?\s*([A-Z]{0,4}\s*\d{4,})/i)
+    ||matchFirst(oneLine,/\b(WO\s*\d+)\b/i)
+    ||matchFirst(oneLine,/\b(WO\d+)\b/i)
+  );
+  const poNumber=normaliseCode(matchFirst(oneLine,/\b(PO\s*[A-Z]?\d+)\b/i));
+  const notes=extractScope(compact)||cleanMultiline(labelled("Scope of Work",["Notes"]));
+  return {
+    title:reference,
+    address,
+    client:clientBlock,
+    clientContact:clientBlock,
+    site:site||guessSiteFromText(address),
+    jobNumber,
+    quoteNumber,
+    workOrderNumber,
+    poNumber,
+    notes
+  };
+}
+
+async function processJobPackImport(row,{silent=false}={}){
+  try{
+    const startedAt=new Date().toISOString();
+    const {error:startError}=await supabase.from("job_pack_imports").update({processing_status:"parsing",error_message:null,updated_at:startedAt}).eq("id",row.id);
+    if(startError)throw startError;
+    const file=await downloadPrivatePdf(row.storage_bucket,row.storage_object_path);
+    const text=await extractTextFromPdf(file);
+    const parsed=parseAimJobSheet(text);
+    if(!parsed.title)throw new Error("Reference/job title could not be extracted from the fixed Tradify job-pack layout.");
+    if(!parsed.jobNumber&&!parsed.workOrderNumber)throw new Error("Job number or work order could not be extracted from the job pack.");
+    const now=new Date().toISOString();
+    const {error:updateError}=await supabase.from("job_pack_imports").update({parsed_fields:parsed,processing_status:"parsed",import_status:"parsed",parsed_at:now,updated_at:now,error_message:null}).eq("id",row.id);
+    if(updateError)throw updateError;
+    const {data:jobId,error:importError}=await supabase.rpc("aimcg_create_job_from_pack",{p_import_id:row.id});
+    if(importError)throw importError;
+    return {ok:true,jobId,parsed};
+  }catch(error){
+    const message=error instanceof Error?error.message:String(error);
+    await supabase.from("job_pack_imports").update({processing_status:"review_required",import_status:"parse_failed",error_message:message,updated_at:new Date().toISOString()}).eq("id",row.id);
+    if(!silent)console.error("Job-pack import failed",error);
+    throw error;
+  }
+}
 function extractClient(text){ const start=text.indexOf("Job Sheet"); const end=text.indexOf("Job Address"); if(start===-1||end===-1) return ""; return cleanMultiline(text.slice(start,end).replace(/Job Sheet/i,"").replace(/\d{1,2}\s+\w+\s+\d{4}/g,"")); }
 function extractScope(text){ const m=text.match(/Job Number\s+[A-Z]{0,4}\s*\d{3,}/i); const notes=text.toLowerCase().indexOf("notes"); if(!m||notes===-1) return ""; return text.slice(m.index+m[0].length,notes).split("\n").map(l=>l.trim()).filter(Boolean).join("\n"); }
 function extractBetween(text,startLabel,endLabel){ const s=text.toLowerCase().indexOf(startLabel.toLowerCase()); if(s===-1)return""; const rest=text.slice(s+startLabel.length); const e=rest.toLowerCase().indexOf(endLabel.toLowerCase()); return (e===-1?rest:rest.slice(0,e)).trim(); }
