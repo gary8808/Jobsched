@@ -1,4 +1,4 @@
-AIM CG v42 – Machinery Scheduling ol
+AIM CG v42 – Machinery Scheduling
 
 See BUILD_NOTES_v42_MACHINERY.md for deployment instructions.
 
@@ -37,3 +37,7 @@ Each job contains:
 This version stores data in the browser using localStorage. It does not yet sync between devices or users.
 
 For real multi-user use, the next stage would be Supabase or Firebase.
+
+
+## Current build
+AIM CG Jobsched v51a stability patch. See BUILD_NOTES_v51a.md and V51A_DEPLOYMENT_STEPS.md.

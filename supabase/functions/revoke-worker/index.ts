@@ -29,11 +29,30 @@ serve(async (req) => {
 
     const body = await req.json();
     const workerId = String(body.worker_id || "").trim();
+    const action = String(body.action || "revoke").toLowerCase();
     if (!workerId) return json({ error: "worker_id is required" }, 400);
+    if (!["revoke", "restore"].includes(action)) return json({ error: "action must be revoke or restore" }, 400);
 
     const { data: worker, error: workerError } = await admin.from("workers").select("id,profile_id,email,name").eq("id", workerId).maybeSingle();
     if (workerError) throw workerError;
     if (!worker) return json({ error: "Worker not found" }, 404);
+
+    if (action === "restore") {
+      const { error: workerUpdateError } = await admin.from("workers").update({
+        access_revoked: false,
+        inactive: false,
+        updated_at: new Date().toISOString(),
+      }).eq("id", workerId);
+      if (workerUpdateError) throw workerUpdateError;
+
+      if (worker.profile_id) {
+        const { error: profileUpdateError } = await admin.from("profiles").update({ active: true }).eq("id", worker.profile_id);
+        if (profileUpdateError) throw profileUpdateError;
+        const { error: unbanError } = await admin.auth.admin.updateUserById(worker.profile_id, { ban_duration: "none" });
+        if (unbanError) throw unbanError;
+      }
+      return json({ ok: true, action: "restore", worker_id: workerId, user_id: worker.profile_id || null });
+    }
 
     const { error: workerUpdateError } = await admin.from("workers").update({
       access_revoked: true,
@@ -46,15 +65,14 @@ serve(async (req) => {
     if (worker.profile_id) {
       const { error: profileUpdateError } = await admin.from("profiles").update({ active: false }).eq("id", worker.profile_id);
       if (profileUpdateError) throw profileUpdateError;
-
       const { error: banError } = await admin.auth.admin.updateUserById(worker.profile_id, { ban_duration: "876000h" });
       if (banError) throw banError;
     }
 
-    return json({ ok: true, worker_id: workerId, user_id: worker.profile_id || null });
+    return json({ ok: true, action: "revoke", worker_id: workerId, user_id: worker.profile_id || null });
   } catch (error) {
     console.error(error);
-    return json({ error: error?.message || "Could not revoke worker access" }, 500);
+    return json({ error: error?.message || "Could not update worker access" }, 500);
   }
 });
 
