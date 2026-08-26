@@ -1849,3 +1849,31 @@ label textarea {
 
 .people-order-hint{font-size:11px;margin:-4px 0 8px}.people-list button[draggable="true"]{cursor:grab}.people-list button[draggable="true"]:active{cursor:grabbing}
 @media (min-width:1101px){.worker-filters{position:sticky;top:0;z-index:16}.calendar-week-controls{position:sticky;top:58px;z-index:16;background:#f4f6f8;padding:6px 0;margin-bottom:6px}.quick-actions-bar{position:sticky;top:108px;z-index:16}}
+
+/* v51c calendar/navigation, tags and reference management */
+.calendar-navigation-shell{position:relative;min-width:0}
+.calendar-side-arrow{position:fixed!important;top:50vh!important;transform:translateY(-50%)!important;z-index:10!important;float:none!important;margin:0!important}
+.calendar-side-arrow-left{left:88px!important}
+.calendar-side-arrow-right{right:14px!important}
+body:has(.modal-backdrop) .calendar-side-arrow{visibility:hidden!important;pointer-events:none!important}
+.calendar-area{position:relative;min-width:0}
+@media (min-width:1101px){
+  .worker-filters{position:sticky!important;top:0!important;z-index:15!important;background:#f4f6f8}
+  .calendar-week-controls{position:sticky!important;top:56px!important;z-index:15!important;background:#f4f6f8;padding:5px 0!important}
+  .quick-actions-bar{position:sticky!important;top:104px!important;z-index:15!important;background:#fff}
+  .calendar-wrap{max-height:calc(100vh - 160px)!important;overflow:auto!important}
+  .calendar-wrap .corner-cell,.calendar-wrap .day-header{position:sticky!important;top:0!important;z-index:7!important}
+  .calendar-wrap .corner-cell{left:0!important;z-index:9!important}
+  .calendar-wrap .worker-cell{position:sticky!important;left:0!important;z-index:6!important}
+}
+@media(max-width:1100px){.calendar-side-arrow-left{left:8px!important}.calendar-side-arrow-right{right:8px!important}}
+
+.job-tag-editor{margin:2px 0 13px}.tag-entry-row{display:flex;gap:8px;align-items:center}.tag-entry-row input{flex:1}.tag-entry-row button{flex:0 0 auto}.job-tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}.job-tags>span{display:inline-flex;align-items:center;gap:4px;background:#e8f0ff;color:#254f9b;border:1px solid #c6d8fa;border-radius:999px;padding:3px 7px;font-size:10px;font-weight:850}.job-tags>span button{display:inline-flex;align-items:center;justify-content:center;width:17px;height:17px;border-radius:999px;background:transparent;color:inherit;padding:0}.preview-tags{margin-top:6px}.preview-tags>span{font-size:10px}.editable-tags>span{font-size:12px;padding:5px 8px}
+.reference-add-row{display:flex;gap:8px;margin:14px 0}.reference-add-row input{flex:1}.reference-list{display:grid;gap:8px;max-height:50vh;overflow:auto}.reference-list>div:not(.empty){display:flex;align-items:center;justify-content:space-between;gap:12px;border:1px solid #e1e6ee;border-radius:12px;padding:10px 12px;background:#f8fafc}.reference-list>div>div{display:flex;gap:6px}.reference-list .danger{display:inline-flex;align-items:center;gap:5px;padding:8px 10px;border-radius:10px;background:#fff1f0}
+.modal-action-spacer{flex:1}
+
+/* Machinery dates must be part of the horizontally scrollable grid. */
+.machinery-calendar-wrap{overflow-x:auto!important;overflow-y:auto!important;max-width:100%}
+.machinery-calendar-grid{grid-template-columns:220px repeat(var(--day-count),minmax(185px,185px))!important;min-width:max-content!important;width:max-content!important}
+.machinery-calendar-grid .day-header{position:sticky;top:0;left:auto!important}
+.machinery-calendar-grid .machine-cell{position:sticky;left:0;z-index:6}

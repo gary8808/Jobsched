@@ -1,0 +1,26 @@
+# v51c focused regression check
+
+- Calendar left arrow follows vertical scrolling.
+- Calendar right arrow follows vertical scrolling.
+- Neither arrow overlays an open modal.
+- Calendar dates remain visible during vertical calendar scrolling.
+- Quick Actions remain accessible during scheduling.
+- Edge arrows move horizontally first, then cross to the adjacent week at the edge.
+- Filters and vertical position are retained when changing week.
+- Machinery date columns scroll horizontally.
+- FastField `Additional works = No` produces `Further work identified = false`.
+- FastField `Additional works = Yes` produces `Further work identified = true`.
+- FastField job number `05014` matches AIM job `5014` when unique.
+- FastField Reprocess updates an existing older parsed row.
+- New job tag can be created and saved.
+- Existing tag can be reused without duplicate casing variants.
+- Tag displays on calendar preview below SMS/Client Accepted.
+- Main search finds a job by tag.
+- Tag filter returns tagged jobs.
+- Admin can add/remove/rename a site.
+- Admin can add/remove/rename a trade.
+- New site/trade appears in job and employee selectors.
+- Unavailable employee scheduling prompts Admin; Proceed keeps job visible.
+- Unused inventory material can be deleted.
+- Used inventory material is archived rather than hard-deleted.
+- Archived material is removed from active stock list.
