@@ -1877,3 +1877,12 @@ body:has(.modal-backdrop) .calendar-side-arrow{visibility:hidden!important;point
 .machinery-calendar-grid{grid-template-columns:220px repeat(var(--day-count),minmax(185px,185px))!important;min-width:max-content!important;width:max-content!important}
 .machinery-calendar-grid .day-header{position:sticky;top:0;left:auto!important}
 .machinery-calendar-grid .machine-cell{position:sticky;left:0;z-index:6}
+
+/* v51d hotfix: calendar edge placement and People drag/drop feedback */
+@media (min-width:1101px){
+  /* Desktop layout: 80px app left inset + 300px bucket column. Centre the
+     arrow over the bucket/calendar boundary rather than beside the side nav. */
+  .app.admin-mode .calendar-side-arrow-left{left:361px!important}
+}
+.people-list button.dragging{opacity:.55;outline:2px dashed #8791a1;outline-offset:2px}
+.people-list button[draggable="true"]{user-select:none}
