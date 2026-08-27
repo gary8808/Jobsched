@@ -1,6 +1,6 @@
 {
   "name": "aim-cg",
-  "version": "1.51.4",
+  "version": "1.51.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -16,7 +16,8 @@
     "react-dom": "latest",
     "lucide-react": "latest",
     "pdfjs-dist": "latest",
-    "xlsx": "latest"
+    "xlsx": "latest",
+    "jsqr": "1.4.0"
   },
   "devDependencies": {}
 }

@@ -1,5 +1,5 @@
 
-// AIM CG v51c - stability, job tags, managed sites/trades and calendar usability
+// AIM CG v51e - tag persistence, Trade inventory issue and mobile calendar hotfix
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
+import jsQR from "jsqr";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "./styles.css";
 import { supabase, supabaseConfig } from "./supabaseClient";
@@ -96,33 +97,112 @@ function logRealtimeStatus(label, status, error) {
 }
 
 
-function TradeJobMaterials({ job, items, locations, movements }) {
-  const inventoryRows = buildJobInventoryMaterialRows(job.id, items, locations, movements)
-    .filter(row => row.net !== 0);
-  const specialOrderMaterials = job.materials || [];
+function TradeJobMaterials({ job }) {
+  const [rows,setRows]=useState([]);
+  const [catalog,setCatalog]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [issueOpen,setIssueOpen]=useState(false);
+  const [error,setError]=useState("");
 
-  return (
-    <div className="trade-material-sections">
-      <section>
-        <strong>Inventory materials</strong>
-        {inventoryRows.map(row => (
-          <p key={`${row.item.id}-${row.locationId}`}>
-            • {row.item.itemNumber} · {row.item.name} — {row.net} {row.item.unitOfMeasure}
-            {` (${row.locationName || "Location not set"})`}
-          </p>
-        ))}
-        {!inventoryRows.length && <p>No inventory materials issued.</p>}
-      </section>
+  async function load(){
+    if(!supabase||!isUuid(job?.id)){setLoading(false);return;}
+    setLoading(true);setError("");
+    try{
+      const [catalogRows,jobRows]=await Promise.all([
+        fetchTradeInventoryCatalogFromSupabase(),
+        fetchTradeJobMaterialsFromSupabase(job.id)
+      ]);
+      setCatalog(catalogRows);setRows(jobRows);
+    }catch(err){console.error(err);setError(err?.message||"Could not load inventory materials.");}
+    finally{setLoading(false);}
+  }
+  useEffect(()=>{load();},[job?.id]);
 
-      <section>
-        <strong>Special order materials</strong>
-        {specialOrderMaterials.map(material => (
-          <p key={material.id}>• {material.text}</p>
-        ))}
-        {!specialOrderMaterials.length && <p>No special order materials listed.</p>}
-      </section>
-    </div>
-  );
+  return <div className="trade-material-sections">
+    <section>
+      <div className="trade-material-heading"><div><strong>Inventory materials</strong><span>View available stock and issue materials to this job.</span></div><button type="button" className="primary" onClick={()=>setIssueOpen(true)}><PackagePlus size={15}/> Add materials</button></div>
+      {loading&&<p>Loading materials…</p>}
+      {error&&<p className="save-error">{error}</p>}
+      {!loading&&rows.map(row=><p key={`${row.itemId}-${row.locationId}`}>• {row.itemNumber} · {row.itemName} — {row.netQuantity} {row.unitOfMeasure} ({row.locationName||"Location not set"})</p>)}
+      {!loading&&!rows.length&&!error&&<p>No inventory materials issued.</p>}
+    </section>
+    {issueOpen&&<TradeMaterialIssueModal job={job} catalog={catalog} onClose={()=>setIssueOpen(false)} onSaved={async()=>{setIssueOpen(false);await load();}}/>}
+  </div>;
+}
+
+function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
+  const [query,setQuery]=useState("");
+  const [selectedKey,setSelectedKey]=useState("");
+  const [quantity,setQuantity]=useState("1");
+  const [qrValue,setQrValue]=useState("");
+  const [scanStatus,setScanStatus]=useState("");
+  const [saving,setSaving]=useState(false);
+  const active=(catalog||[]);
+  const filtered=active.filter(row=>{
+    const q=query.trim().toLowerCase();if(!q)return true;
+    return [row.itemNumber,row.itemName,row.locationName,row.qrCode,row.itemId].some(v=>String(v||"").toLowerCase().includes(q));
+  }).slice(0,80);
+  const selected=active.find(row=>`${row.itemId}:${row.locationId}`===selectedKey)||null;
+
+  function resolveQr(raw){
+    const text=String(raw||"").trim();if(!text)return;
+    let candidates=[text];
+    try{const url=new URL(text);candidates.push(url.searchParams.get("stock")||"",url.searchParams.get("item")||"",url.searchParams.get("qr")||"");const parts=url.pathname.split("/").filter(Boolean);if(parts.length)candidates.push(parts[parts.length-1]);}catch{}
+    const lowered=candidates.filter(Boolean).map(v=>String(v).trim().toLowerCase());
+    const row=active.find(r=>lowered.some(v=>[r.qrCode,r.itemNumber,r.itemId].some(x=>String(x||"").trim().toLowerCase()===v)));
+    if(!row){setScanStatus("QR code did not match an active stock item.");return;}
+    setSelectedKey(`${row.itemId}:${row.locationId}`);setQuery(row.itemName);setScanStatus(`Selected ${row.itemName} · ${row.locationName}`);
+  }
+
+  async function scanImage(file){
+    if(!file)return;
+    setScanStatus("Reading QR code…");
+    try{
+      let raw="";
+      if(window.BarcodeDetector&&window.createImageBitmap){
+        try{
+          const detector=new window.BarcodeDetector({formats:["qr_code"]});
+          const bitmap=await createImageBitmap(file);
+          const codes=await detector.detect(bitmap);
+          if(bitmap.close)bitmap.close();
+          raw=codes?.[0]?.rawValue||"";
+        }catch{}
+      }
+      if(!raw){
+        const bitmap=await createImageBitmap(file);
+        const maxSide=1400;
+        const scale=Math.min(1,maxSide/Math.max(bitmap.width,bitmap.height));
+        const canvas=document.createElement("canvas");
+        canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
+        const ctx=canvas.getContext("2d",{willReadFrequently:true});
+        ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);
+        if(bitmap.close)bitmap.close();
+        const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
+        raw=jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:"attemptBoth"})?.data||"";
+      }
+      if(!raw)throw new Error("No QR code was detected. Move closer to the label and try again.");
+      setQrValue(raw);resolveQr(raw);
+    }catch(err){setScanStatus(err?.message||"Could not read QR code.");}
+  }
+
+  async function save(){
+    if(!selected){alert("Select a material first.");return;}
+    if(Number(selected.quantityAvailable)<=0){alert("There is no available stock at this location.");return;}
+    const qty=Number(quantity);if(!Number.isFinite(qty)||qty<=0){alert("Enter a quantity greater than zero.");return;}
+    if(qty>Number(selected.quantityAvailable)){alert(`Only ${selected.quantityAvailable} ${selected.unitOfMeasure} available at this location.`);return;}
+    setSaving(true);
+    try{await issueTradeInventoryToJob({jobId:job.id,itemId:selected.itemId,locationId:selected.locationId,quantity:qty});await onSaved();}
+    catch(err){console.error(err);alert(err?.message||"Could not add material to the job.");}
+    finally{setSaving(false);}
+  }
+
+  return <div className="nested-modal"><div className="modal mini-modal trade-material-modal"><div className="modal-header"><div><h2>Add materials</h2><p>{job.jobNumber||job.workOrderNumber||"Job"} · {job.title}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div>
+    <section className="qr-issue-panel"><strong><QrCode size={17}/> Scan QR code</strong><p className="muted">On supported devices, photograph the material QR label. You can also enter the QR/item code manually.</p><div className="qr-actions"><label className="secondary file-pick"><QrCode size={15}/> Scan QR<input type="file" accept="image/*" capture="environment" onChange={e=>scanImage(e.target.files?.[0])}/></label><input value={qrValue} onChange={e=>setQrValue(e.target.value)} placeholder="QR / item code"/><button type="button" className="secondary" onClick={()=>resolveQr(qrValue)}>Use code</button></div>{scanStatus&&<p className="muted">{scanStatus}</p>}</section>
+    <label>Search material<input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Item number, product name or location…"/></label>
+    <div className="trade-material-results">{filtered.map(row=><button type="button" key={`${row.itemId}:${row.locationId}`} className={selectedKey===`${row.itemId}:${row.locationId}`?"selected":""} onClick={()=>setSelectedKey(`${row.itemId}:${row.locationId}`)}><strong>{row.itemNumber} · {row.itemName}</strong><span>{row.locationName||"Location not set"}</span><em>{row.quantityAvailable} {row.unitOfMeasure} available</em></button>)}{!filtered.length&&<div className="empty small">No available materials match.</div>}</div>
+    {selected&&<div className="selected-material-issue"><div><strong>{selected.itemName}</strong><span>{selected.itemNumber} · {selected.locationName}</span><em>{selected.quantityAvailable} {selected.unitOfMeasure} available</em></div><label>Quantity to add<input type="number" min="0.01" step="0.01" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label></div>}
+    <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="primary" disabled={!selected||Number(selected?.quantityAvailable)<=0||saving} onClick={save}>{saving?"Adding…":"Add to job"}</button></div>
+  </div></div>;
 }
 
 function App() {
@@ -3285,7 +3365,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   return <main className="employee-view app-like-view"><section className="employee-app-header"><div><span className="app-kicker">Trade schedule</span><h2>{worker.name||"Employee"}</h2><p>{worker.trade||"No trade"} · {worker.baseSite||"No site"}</p></div>{canSwitchWorker?<label>View as<select value={worker.id||""} onChange={e=>setWorkerId(e.target.value)}>{workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>:<span className="employee-role-pill">Trade access only</span>}</section>
   {showRunningReminder&&<section className="running-job-reminder"><AlertCircle size={20}/><div><strong>Job timer still running after 6:15 pm</strong><span>{runningJobs.map(j=>j.title).join(", ")} {runningJobs.length===1?"is":"are"} still accumulating time. Select the job and tap Offsite when finished.</span></div></section>}
   <div className="employee-range-tabs pill-tabs"><button className={range==="today"?"active":""} onClick={()=>setRange("today")}>Today</button><button className={range==="tomorrow"?"active":""} onClick={()=>setRange("tomorrow")}>Tomorrow</button><button className={range==="fortnight"?"active":""} onClick={()=>setRange("fortnight")}>Next 2 weeks</button></div>
-  <section className="employee-list">{displayDays.map(day=>{const iso=getIsoDate(day);const availability=getWorkerAvailability(worker,iso,leaveRecords);const dayJobs=visible.filter(j=>jobOccursForWorkerOnDate(j,worker.id,iso)).sort(sortScheduleItems);return <div key={iso} className="employee-day"><h3>{formatIsoForDisplay(iso)} <span className={`roster-badge ${availability.status==="Onsite"?"onsite":"rnr"}`}>{availability.label}</span></h3>{dayJobs.map(job=>{const status=getCurrentWorkerStatus(job,worker.id);const expanded=expandedJobId===job.id;const savedCompletion=job.workerCompletions?.[worker.id]||{};const currentCompletion=(!getCurrentVisitId(job)||savedCompletion.visitId===getCurrentVisitId(job))?savedCompletion:{};const completion={completionDescription:"",materialsUsed:"",requiresAnotherTrade:false,followUpTrade:"",...currentCompletion,...(completionDrafts[job.id]||{})};return <article key={job.id} className={`employee-job-card app-job-card compact-trade-card ${expanded?"expanded":"collapsed"} ${isDefectJob(job)?"employee-defect-job":""} ${status==="completed"&&!isDefectJob(job)?"employee-complete":""}`}><button type="button" className="employee-job-banner trade-card-toggle" onClick={()=>setExpandedJobId(expanded?"":job.id)}><div><span className="wo">{job.workOrderNumber||job.jobNumber||"Job"}</span><h4>{job.title}</h4>{isDefectJob(job)&&<span className="employee-defect-pill">DEFECTS JOB</span>}</div><div className="trade-card-status">{!job.isTravelComment&&<span className={`status-dot ${status}`}>{STATUS_META[status].icon} {STATUS_META[status].label}</span>}<ChevronDown size={18}/></div></button>{expanded&&<div className="trade-card-expanded">{job.isAdHoc?<AdHocEmployeeCard job={job} worker={worker} status={status} onStatus={onStatus} onAddAttachment={onAddAttachment} onAddNote={onAddNote}/>:job.isTravelComment?<TravelEmployeeCard job={job}/>:<><p className="address-line">{job.address}</p><div className="employee-quick-info">{job.site&&<span>{job.site}</span>}<span>{jobTradeText(job)||"No trade set"}</span><span>Materials: {job.materialsStatus||"Parts from stock"}</span></div>{(job.tags||[]).length>0&&<div className="job-tags">{job.tags.map(tag=><span key={tag}>{tag}</span>)}</div>}{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).length>0&&<div className="employee-machinery-panel"><strong><Tractor size={15}/> Machinery assigned</strong>{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).map(b=>{const machine=machines.find(m=>m.id===b.machineId);return <span key={b.id}>{machine?machineDisplayName(machine):(b.description||`Machinery asset ${String(b.machineId||"").slice(0,8)}`)} · {b.period==="full_day"?"Full day":b.period.toUpperCase()}</span>})}</div>}<div className="employee-actions primary-actions-row"><a className="secondary" href={job.clientPhone?`tel:${job.clientPhone}`:undefined} onClick={e=>{if(!job.clientPhone){e.preventDefault();alert("No client phone number saved.");}}}><Phone size={16}/> Call site contact</a><button className="secondary" onClick={()=>onStatus(job.id,worker.id,"running")}><Play size={16}/> Onsite</button><button className="secondary" onClick={()=>onStatus(job.id,worker.id,"stopped")}><Square size={16}/> Offsite</button><button className="secondary" onClick={()=>onStatus(job.id,worker.id,status==="completed"?"notStarted":"completed")}><CheckCircle2 size={16}/> {status==="completed"?"Mark incomplete":"Complete"}</button></div><p className="time-total"><Clock size={14}/> Total running time: {formatDuration(getWorkerTotalMs(job,worker.id))}</p><div className="employee-card-tabs"><details open><summary>Job description</summary><pre>{job.notes}</pre></details><details><summary>Job notes</summary>{(job.noteHistory||[]).filter(n=>n.showInTradeView).map(n=><div key={n.id} className="trade-note"><strong>{n.user}</strong><span>{formatDateTime(n.date)}</span><p>{n.text}</p></div>)}{!(job.noteHistory||[]).some(n=>n.showInTradeView)&&<p>No notes shared with Trade View.</p>}</details><details><summary>Materials list</summary><TradeJobMaterials job={job} items={inventoryItems} locations={inventoryLocations} movements={inventoryMovements}/></details><details><summary>Photos</summary><div className="photo-upload-row"><label className="secondary file-pick">Upload photos<input type="file" accept="image/*" multiple onChange={e=>onAddAttachment(job.id,worker.id,e.target.files||[])}/></label><label className="secondary file-pick">Camera<input type="file" accept="image/*" capture="environment" onChange={e=>onAddAttachment(job.id,worker.id,e.target.files||[])}/></label></div><div className="simple-list">{(job.attachments||[]).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button></div>)}{!(job.attachments||[]).length&&<p>No photos/files added.</p>}</div></details><details open={completionFor===job.id}><summary onClick={()=>setCompletionFor(completionFor===job.id?null:job.id)}>Job completion</summary><label>Description of works<textarea rows="4" value={completion.completionDescription||""} onChange={e=>updateCompletionDraft(job.id,"completionDescription",e.target.value)} placeholder="Describe the works completed..."/></label><label>Approximate materials used<textarea rows="3" value={completion.materialsUsed||""} onChange={e=>updateCompletionDraft(job.id,"materialsUsed",e.target.value)} placeholder="List approximate materials used..."/></label><label className="check-option plain"><input type="checkbox" checked={Boolean(completion.requiresAnotherTrade)} onChange={e=>updateCompletionDraft(job.id,"requiresAnotherTrade",e.target.checked)}/>Notify supervisors that this portion is complete but another trade is required</label>{completion.requiresAnotherTrade&&<label>Trade required<select value={completion.followUpTrade||""} onChange={e=>updateCompletionDraft(job.id,"followUpTrade",e.target.value)}><option value="">Select trade</option>{tradeOptions.map(t=><option key={t}>{t}</option>)}</select></label>}<p className="muted">Use the Save update button below to save completion details.</p></details></div><div className="employee-save-row"><button className={`primary ${completionSaveStatus[job.id]==="saved"?"save-success":""}`} onClick={()=>saveCompletion(job)} disabled={completionSaveStatus[job.id]==="saving"}>{completionSaveStatus[job.id]==="saving"?"Saving...":completionSaveStatus[job.id]==="saved"?"Saved":"Save update"}</button>{completionSaveStatus[job.id]==="error"&&<span className="save-error">Not saved</span>}</div></>}</div>}</article>})}{!dayJobs.length&&<p className="muted">No jobs scheduled.</p>}</div>})}</section></main>;
+  <section className="employee-list">{displayDays.map(day=>{const iso=getIsoDate(day);const availability=getWorkerAvailability(worker,iso,leaveRecords);const dayJobs=visible.filter(j=>jobOccursForWorkerOnDate(j,worker.id,iso)).sort(sortScheduleItems);return <div key={iso} className="employee-day"><h3>{formatIsoForDisplay(iso)} <span className={`roster-badge ${availability.status==="Onsite"?"onsite":"rnr"}`}>{availability.label}</span></h3>{dayJobs.map(job=>{const status=getCurrentWorkerStatus(job,worker.id);const expanded=expandedJobId===job.id;const savedCompletion=job.workerCompletions?.[worker.id]||{};const currentCompletion=(!getCurrentVisitId(job)||savedCompletion.visitId===getCurrentVisitId(job))?savedCompletion:{};const completion={completionDescription:"",materialsUsed:"",requiresAnotherTrade:false,followUpTrade:"",...currentCompletion,...(completionDrafts[job.id]||{})};return <article key={job.id} className={`employee-job-card app-job-card compact-trade-card ${expanded?"expanded":"collapsed"} ${isDefectJob(job)?"employee-defect-job":""} ${status==="completed"&&!isDefectJob(job)?"employee-complete":""}`}><button type="button" className="employee-job-banner trade-card-toggle" onClick={()=>setExpandedJobId(expanded?"":job.id)}><div><span className="wo">{job.workOrderNumber||job.jobNumber||"Job"}</span><h4>{job.title}</h4>{isDefectJob(job)&&<span className="employee-defect-pill">DEFECTS JOB</span>}</div><div className="trade-card-status">{!job.isTravelComment&&<span className={`status-dot ${status}`}>{STATUS_META[status].icon} {STATUS_META[status].label}</span>}<ChevronDown size={18}/></div></button>{expanded&&<div className="trade-card-expanded">{job.isAdHoc?<AdHocEmployeeCard job={job} worker={worker} status={status} onStatus={onStatus} onAddAttachment={onAddAttachment} onAddNote={onAddNote}/>:job.isTravelComment?<TravelEmployeeCard job={job}/>:<><p className="address-line">{job.address}</p><div className="employee-quick-info">{job.site&&<span>{job.site}</span>}<span>{jobTradeText(job)||"No trade set"}</span><span>Materials: {job.materialsStatus||"Parts from stock"}</span></div>{(job.tags||[]).length>0&&<div className="job-tags">{job.tags.map(tag=><span key={tag}>{tag}</span>)}</div>}{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).length>0&&<div className="employee-machinery-panel"><strong><Tractor size={15}/> Machinery assigned</strong>{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).map(b=>{const machine=machines.find(m=>m.id===b.machineId);return <span key={b.id}>{machine?machineDisplayName(machine):(b.description||`Machinery asset ${String(b.machineId||"").slice(0,8)}`)} · {b.period==="full_day"?"Full day":b.period.toUpperCase()}</span>})}</div>}<div className="employee-actions primary-actions-row"><a className="secondary" href={job.clientPhone?`tel:${job.clientPhone}`:undefined} onClick={e=>{if(!job.clientPhone){e.preventDefault();alert("No client phone number saved.");}}}><Phone size={16}/> Call site contact</a><button className="secondary" onClick={()=>onStatus(job.id,worker.id,"running")}><Play size={16}/> Onsite</button><button className="secondary" onClick={()=>onStatus(job.id,worker.id,"stopped")}><Square size={16}/> Offsite</button><button className="secondary" onClick={()=>onStatus(job.id,worker.id,status==="completed"?"notStarted":"completed")}><CheckCircle2 size={16}/> {status==="completed"?"Mark incomplete":"Complete"}</button></div><p className="time-total"><Clock size={14}/> Total running time: {formatDuration(getWorkerTotalMs(job,worker.id))}</p><div className="employee-card-tabs"><details open><summary>Job description</summary><pre>{job.notes}</pre></details><details><summary>Job notes</summary>{(job.noteHistory||[]).filter(n=>n.showInTradeView).map(n=><div key={n.id} className="trade-note"><strong>{n.user}</strong><span>{formatDateTime(n.date)}</span><p>{n.text}</p></div>)}{!(job.noteHistory||[]).some(n=>n.showInTradeView)&&<p>No notes shared with Trade View.</p>}</details><details><summary>Materials list</summary><TradeJobMaterials job={job}/></details><details><summary>Photos</summary><div className="photo-upload-row"><label className="secondary file-pick">Upload photos<input type="file" accept="image/*" multiple onChange={e=>onAddAttachment(job.id,worker.id,e.target.files||[])}/></label><label className="secondary file-pick">Camera<input type="file" accept="image/*" capture="environment" onChange={e=>onAddAttachment(job.id,worker.id,e.target.files||[])}/></label></div><div className="simple-list">{(job.attachments||[]).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button></div>)}{!(job.attachments||[]).length&&<p>No photos/files added.</p>}</div></details><details open={completionFor===job.id}><summary onClick={()=>setCompletionFor(completionFor===job.id?null:job.id)}>Job completion</summary><label>Description of works<textarea rows="4" value={completion.completionDescription||""} onChange={e=>updateCompletionDraft(job.id,"completionDescription",e.target.value)} placeholder="Describe the works completed..."/></label><label className="check-option plain"><input type="checkbox" checked={Boolean(completion.requiresAnotherTrade)} onChange={e=>updateCompletionDraft(job.id,"requiresAnotherTrade",e.target.checked)}/>Notify supervisors that this portion is complete but another trade is required</label>{completion.requiresAnotherTrade&&<label>Trade required<select value={completion.followUpTrade||""} onChange={e=>updateCompletionDraft(job.id,"followUpTrade",e.target.value)}><option value="">Select trade</option>{tradeOptions.map(t=><option key={t}>{t}</option>)}</select></label>}<p className="muted">Use the Save update button below to save completion details.</p></details></div><div className="employee-save-row"><button className={`primary ${completionSaveStatus[job.id]==="saved"?"save-success":""}`} onClick={()=>saveCompletion(job)} disabled={completionSaveStatus[job.id]==="saving"}>{completionSaveStatus[job.id]==="saving"?"Saving...":completionSaveStatus[job.id]==="saved"?"Saved":"Save update"}</button>{completionSaveStatus[job.id]==="error"&&<span className="save-error">Not saved</span>}</div></>}</div>}</article>})}{!dayJobs.length&&<p className="muted">No jobs scheduled.</p>}</div>})}</section></main>;
 }
 
 function AdHocEmployeeCard({ job, worker, status, onStatus, onAddAttachment, onAddNote }) {
@@ -3481,6 +3561,33 @@ async function deleteOrArchiveInventoryItemFromSupabase(item,{hasHistory=false,a
   if(auditError&&!/does not exist|schema cache/i.test(auditError.message||""))console.warn("Inventory audit entry failed",auditError);
 }
 
+
+async function fetchTradeInventoryCatalogFromSupabase(){
+  if(!supabase)return [];
+  const {data,error}=await supabase.rpc("aimcg_trade_inventory_catalog");
+  if(error){
+    if(["42883","PGRST202","PGRST205"].includes(error.code)||/aimcg_trade_inventory_catalog|function.*not found/i.test(error.message||"")) throw new Error("Run SUPABASE_MIGRATION_v51e_TAG_LINKS_TRADE_INVENTORY.sql before using Trade materials.");
+    throw error;
+  }
+  return (data||[]).map(r=>({itemId:r.item_id,itemNumber:r.item_number||"",itemName:r.item_name||"",description:r.item_description||"",unitOfMeasure:r.unit_of_measure||"each",locationId:r.location_id,locationName:r.location_name||"",qrCode:r.qr_code||r.item_number||r.item_id,quantityAvailable:Number(r.quantity_available)||0}));
+}
+async function fetchTradeJobMaterialsFromSupabase(jobId){
+  if(!supabase||!isUuid(jobId))return [];
+  const {data,error}=await supabase.rpc("aimcg_trade_job_materials",{p_job_id:jobId});
+  if(error){
+    if(["42883","PGRST202","PGRST205"].includes(error.code)||/aimcg_trade_job_materials|function.*not found/i.test(error.message||"")) throw new Error("Run SUPABASE_MIGRATION_v51e_TAG_LINKS_TRADE_INVENTORY.sql before using Trade materials.");
+    throw error;
+  }
+  return (data||[]).map(r=>({itemId:r.item_id,itemNumber:r.item_number||"",itemName:r.item_name||"",unitOfMeasure:r.unit_of_measure||"each",locationId:r.location_id,locationName:r.location_name||"",netQuantity:Number(r.net_quantity)||0}));
+}
+async function issueTradeInventoryToJob({jobId,itemId,locationId,quantity}){
+  if(!supabase)throw new Error("Supabase is not configured.");
+  const {error}=await supabase.rpc("aimcg_trade_issue_inventory",{p_job_id:jobId,p_item_id:itemId,p_location_id:locationId,p_quantity:Number(quantity)});
+  if(error){
+    if(["42883","PGRST202","PGRST205"].includes(error.code)||/aimcg_trade_issue_inventory|function.*not found/i.test(error.message||"")) throw new Error("Run SUPABASE_MIGRATION_v51e_TAG_LINKS_TRADE_INVENTORY.sql before using Trade materials.");
+    throw error;
+  }
+}
 async function fetchInventoryItemsFromSupabase(){const {data,error}=await supabase.from("inventory_items").select("*").order("item_number");if(error)throw error;return(data||[]).map(r=>({id:r.id,itemNumber:r.item_number||"",name:r.name||"",description:r.description||"",category:r.category||"",brand:r.brand||"",supplierName:r.supplier_name||"",supplierItemNumber:r.supplier_item_number||"",unitOfMeasure:r.unit_of_measure||"each",defaultLocationId:r.default_location_id||"",unitCost:Number(r.unit_cost)||0,averageCost:Number(r.average_cost)||Number(r.unit_cost)||0,minimumQuantity:Number(r.minimum_quantity)||0,reorderQuantity:Number(r.reorder_quantity)||0,barcode:r.barcode||"",qrCode:r.qr_code||r.item_number||"",notes:r.notes||"",active:r.active!==false}));}
 async function fetchInventoryLocationsFromSupabase(){const {data,error}=await supabase.from("inventory_locations").select("*").order("name");if(error)throw error;return(data||[]).map(r=>({id:r.id,name:r.name,code:r.code||"",parentId:r.parent_id||"",active:r.active!==false}));}
 async function fetchInventoryMovementsFromSupabase(){const {data,error}=await supabase.from("inventory_movements").select("*").order("created_at",{ascending:false}).limit(5000);if(error)throw error;return(data||[]).map(r=>({id:r.id,itemId:r.item_id,locationId:r.location_id,jobId:r.job_id||"",movementType:r.movement_type,quantity:Number(r.quantity)||0,unitCost:Number(r.unit_cost)||0,totalCost:Number(r.total_cost)||0,reference:r.reference||"",notes:r.notes||"",createdAt:r.created_at,createdBy:r.created_by||""}));}
@@ -4187,8 +4294,20 @@ async function fetchJobsFromSupabase() {
   let historyByJob = {};
   let completionSubmissionsByJob = {};
   let visitHistoryByJob = {};
+  let jobTagsByJob = {};
   let workerNames = {};
   if (jobIds.length) {
+    try {
+      const { data: tagLinkRows, error: tagLinkError } = await supabase.from("job_tag_links").select("job_id,tag_name").in("job_id", jobIds);
+      if (tagLinkError) throw tagLinkError;
+      jobTagsByJob = (tagLinkRows || []).reduce((acc,row)=>{
+        if(row.job_id && row.tag_name) acc[row.job_id] = [...(acc[row.job_id] || []), row.tag_name];
+        return acc;
+      },{});
+    } catch (error) {
+      // v51e migration may not have been applied yet; retain app_payload tags as fallback.
+      console.warn("Could not load explicit job tag links; using job payload tags.", error);
+    }
     const supplementalSettled = await Promise.allSettled([
       supabase.from("attachments").select("*").in("job_id", jobIds).order("created_at", { ascending: false }),
       supabase.from("job_notes").select("id,job_id,worker_id,note_text,note_type,visit_id,show_in_trade_view,created_by,created_at").in("job_id", jobIds).order("created_at", { ascending: false }),
@@ -4352,6 +4471,7 @@ async function fetchJobsFromSupabase() {
     });
     job = {
       ...job,
+      tags: (jobTagsByJob[row.id] || []).length ? jobTagsByJob[row.id] : (job.tags || []),
       attachments: mergeAttachments(storedAttachments, job.attachments || []),
       noteHistory: mergeHistoryEntries([...completionNotes, ...noteHistory], job.noteHistory || []),
       jobHistory: mergeHistoryEntries(jobHistory, job.jobHistory || []),
@@ -4431,6 +4551,17 @@ async function persistJobToSupabase(job) {
       throw new Error("Run SUPABASE_MIGRATION_v43e_SYNC_AND_ATOMIC_BOOKINGS.sql before saving jobs or schedules.");
     }
     throw saveError;
+  }
+
+  const { error: tagSyncError } = await supabase.rpc("aimcg_replace_job_tags", {
+    p_job_id: normalised.id,
+    p_tags: getJobTagNames(normalised)
+  });
+  if (tagSyncError) {
+    const functionMissing = ["42883", "PGRST202", "PGRST205"].includes(tagSyncError.code)
+      || /aimcg_replace_job_tags|function.*not found/i.test(tagSyncError.message || "");
+    if (functionMissing) throw new Error("Run SUPABASE_MIGRATION_v51e_TAG_LINKS_TRADE_INVENTORY.sql before saving job tags.");
+    throw tagSyncError;
   }
 
   const { error: noteSyncError } = await supabase.rpc("aimcg_replace_admin_job_notes", {

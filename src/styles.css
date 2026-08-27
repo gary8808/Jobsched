@@ -1886,3 +1886,25 @@ body:has(.modal-backdrop) .calendar-side-arrow{visibility:hidden!important;point
 }
 .people-list button.dragging{opacity:.55;outline:2px dashed #8791a1;outline-offset:2px}
 .people-list button[draggable="true"]{user-select:none}
+
+/* v51e: Trade materials and mobile calendar hotfix */
+.trade-material-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}.trade-material-heading>div{display:grid;gap:3px}.trade-material-heading span{font-size:.82rem;color:#667085}.qr-issue-panel{display:grid;gap:8px;padding:12px;border:1px solid #dce2ea;border-radius:12px;background:#f8fafc;margin-bottom:14px}.qr-issue-panel>strong{display:flex;align-items:center;gap:7px}.qr-actions{display:grid;grid-template-columns:auto minmax(160px,1fr) auto;gap:8px;align-items:center}.trade-material-results{display:grid;gap:7px;max-height:280px;overflow:auto;margin-bottom:14px}.trade-material-results>button{display:grid;gap:3px;text-align:left;padding:10px 12px;border-radius:10px;background:#fff;border:1px solid #dce2ea}.trade-material-results>button.selected{border-color:#18202a;box-shadow:0 0 0 2px rgba(24,32,42,.08)}.trade-material-results span,.trade-material-results em,.selected-material-issue span,.selected-material-issue em{color:#667085;font-size:.82rem;font-style:normal}.selected-material-issue{display:grid;grid-template-columns:minmax(0,1fr) 180px;gap:14px;align-items:end;padding:12px;border:1px solid #dce2ea;border-radius:12px;background:#fff}.selected-material-issue>div{display:grid;gap:3px}.selected-material-issue label{margin:0}
+
+@media(max-width:1100px){
+  /* Keep the left arrow clear of the compact side navigation on tablet/mobile. */
+  .app.admin-mode .calendar-side-arrow-left{left:62px!important}
+  .calendar-side-arrow-right{right:8px!important}
+  /* The calendar gets its own vertical scroller so date headers remain visible while moving down rows. */
+  .calendar-wrap{max-height:calc(100vh - 118px)!important;overflow:auto!important}
+  .calendar-wrap .corner-cell,.calendar-wrap .day-header{position:sticky!important;top:0!important;z-index:8!important}
+  .calendar-wrap .corner-cell{left:0!important;z-index:10!important}
+  .calendar-wrap .worker-cell{position:sticky!important;left:0!important;z-index:6!important}
+}
+@media(max-width:760px){
+  .app.admin-mode .calendar-side-arrow-left{left:58px!important}
+  .calendar-side-arrow{width:34px;height:48px}
+  .calendar-wrap{max-height:calc(100vh - 92px)!important}
+  .qr-actions{grid-template-columns:1fr}.qr-actions>*{width:100%}
+  .selected-material-issue{grid-template-columns:1fr}
+  .trade-material-heading{align-items:stretch;flex-direction:column}.trade-material-heading .primary{width:100%}
+}
