@@ -954,25 +954,32 @@ function App() {
     }
   }, [currentUser?.id, profileLoading, isAdminUser]);
 
+  // v51g: Trade View always belongs to the authenticated login. Admin users may
+  // switch into Trade View, but must still see their own worker record rather
+  // than whichever employee happened to be selected/defaulted previously.
   useEffect(() => {
-    if (!currentUser || isAdminUser || !data.teamMembers.length) return;
-    const email = String(currentUser.email || "").toLowerCase();
-    const linkedWorker = data.teamMembers.find(worker => worker.profileId === currentUser.id);
+    if (!currentUser || activeView !== "employee" || !data.teamMembers.length) return;
+    const email = String(currentUser.email || "").trim().toLowerCase();
+    const linkedWorker = data.teamMembers.find(worker =>
+      worker.profileId === currentUser.id && worker.inactive !== true
+    );
     const emailWorker = data.teamMembers.find(worker =>
-      !worker.profileId && worker.email && worker.email.toLowerCase() === email
+      worker.inactive !== true && worker.email && String(worker.email).trim().toLowerCase() === email
     );
     const ownWorker = linkedWorker || emailWorker;
     if (ownWorker && ownWorker.id !== employeeId) setEmployeeId(ownWorker.id);
     if (!ownWorker && employeeId) setEmployeeId("");
-  }, [currentUser?.id, currentUser?.email, isAdminUser, data.teamMembers, employeeId]);
+  }, [currentUser?.id, currentUser?.email, activeView, data.teamMembers, employeeId]);
 
+  // Employee selection is only an Admin Schedule concern. Do not let this
+  // fallback choose the first employee while an admin is viewing Trade View.
   useEffect(() => {
-    if (!isAdminUser || !data.teamMembers.length) return;
+    if (!isAdminUser || activeView !== "admin" || !data.teamMembers.length) return;
     if (!data.teamMembers.some(worker => worker.id === employeeId && !worker.inactive)) {
       const firstActive = data.teamMembers.find(worker => !worker.inactive);
       setEmployeeId(firstActive?.id || "");
     }
-  }, [isAdminUser, data.teamMembers, employeeId]);
+  }, [isAdminUser, activeView, data.teamMembers, employeeId]);
 
   const days = useMemo(() => Array.from({ length: calendarDayCount }, (_, i) => addDays(weekStart, i)), [weekStart, calendarDayCount]);
   const employeeDays = useMemo(() => Array.from({ length: 14 }, (_, i) => addDays(new Date(`${todayKey}T00:00:00`), i)), [todayKey]);
@@ -1966,7 +1973,7 @@ Reply: ${messageText}` };
 
   return (
     <div className={activeView === "admin" ? "app admin-mode" : currentUser ? "app nav-mode employee-mode" : "app"}>
-      {currentUser && <SideNav unreadMessages={unreadMessages} lowStockCount={lowStockCount} isAdmin={isAdminUser} hasStoresPermission={hasStoresPermission} onCalendar={() => { setToolsOpen(false); setInventoryOpen(false); setMachineryOpen(false); setReportsOpen(false); setCloseoutsOpen(false); setJobPacksOpen(false); if (isAdminUser) setAdminTab("schedule"); }} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onPeople={() => setPeopleOpen(true)} onReports={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setReportsOpen(true);}} onCloseouts={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setJobPacksOpen(false);setCloseoutsOpen(true);}} onJobPacks={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(true);}} onTools={() => {setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setInventoryOpen(false);setMachineryOpen(false);setToolsOpen(true);}} onInventory={() => {setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setToolsOpen(false);setMachineryOpen(false);setInventoryOpen(true);}} onMachinery={() => {setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(true);}} onSettings={() => setSettingsOpen(true)} />}
+      {currentUser && <SideNav unreadMessages={unreadMessages} lowStockCount={lowStockCount} isAdmin={isAdminUser} hasStoresPermission={hasStoresPermission} onCalendar={() => { setToolsOpen(false); setInventoryOpen(false); setMachineryOpen(false); setReportsOpen(false); setCloseoutsOpen(false); setJobPacksOpen(false); if (isAdminUser) setAdminTab("schedule"); }} onShare={() => setShareHubOpen(true)} onMessages={() => setMessagesOpen(true)} onReports={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setReportsOpen(true);}} onCloseouts={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setJobPacksOpen(false);setCloseoutsOpen(true);}} onJobPacks={() => {setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(true);}} onTools={() => {setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setInventoryOpen(false);setMachineryOpen(false);setToolsOpen(true);}} onInventory={() => {setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setToolsOpen(false);setMachineryOpen(false);setInventoryOpen(true);}} onMachinery={() => {setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(false);setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(true);}} onSettings={() => setSettingsOpen(true)} />}
       <header className="topbar aim-topbar">
         <div className="brand-block">
           <img src={`${import.meta.env.BASE_URL}aim-logo.png`} alt="AIM Construction Group WA" className="aim-logo" />
@@ -2102,7 +2109,7 @@ Reply: ${messageText}` };
           alert(err?.message || "Could not save employees or send invite.");
         }
       }} />}
-      {settingsOpen && currentUser && <SettingsModal currentUser={currentUser} currentRole={currentRole} isAdminUser={isAdminUser} onManageReferences={()=>{setSettingsOpen(false);setReferenceSettingsOpen(true);}} activeView={activeView} isInstalledPwa={isInstalledPwa} canPromptInstall={Boolean(installPrompt)} onInstall={installJobsched} onOpenCloseouts={()=>{setSettingsOpen(false);setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setJobPacksOpen(false);setCloseoutsOpen(true);}} onOpenJobPacks={()=>{setSettingsOpen(false);setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(true);}} onClose={()=>setSettingsOpen(false)} onSetView={(nextView)=>{setView(nextView); setSettingsOpen(false);}} onChangePassword={()=>{setPasswordSetupMode("manual"); setSettingsOpen(false);}} onSignOut={async()=>{setSettingsOpen(false); await signOut();}} />}
+      {settingsOpen && currentUser && <SettingsModal currentUser={currentUser} currentRole={currentRole} isAdminUser={isAdminUser} onManagePeople={()=>{setSettingsOpen(false);setPeopleOpen(true);}} onManageReferences={()=>{setSettingsOpen(false);setReferenceSettingsOpen(true);}} activeView={activeView} isInstalledPwa={isInstalledPwa} canPromptInstall={Boolean(installPrompt)} onInstall={installJobsched} onOpenCloseouts={()=>{setSettingsOpen(false);setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setJobPacksOpen(false);setCloseoutsOpen(true);}} onOpenJobPacks={()=>{setSettingsOpen(false);setToolsOpen(false);setInventoryOpen(false);setMachineryOpen(false);setReportsOpen(false);setCloseoutsOpen(false);setJobPacksOpen(true);}} onClose={()=>setSettingsOpen(false)} onSetView={(nextView)=>{setView(nextView); setSettingsOpen(false);}} onChangePassword={()=>{setPasswordSetupMode("manual"); setSettingsOpen(false);}} onSignOut={async()=>{setSettingsOpen(false); await signOut();}} />}
       {referenceSettingsOpen && isAdminUser && <ReferenceDataModal trades={tradeOptions} sites={siteOptions} tags={tagOptions} onClose={()=>setReferenceSettingsOpen(false)} onChanged={refreshReferenceData}/>}
       {shareHubOpen && <ShareHubModal onClose={()=>setShareHubOpen(false)} onShare={()=>{setShareHubOpen(false); setShareOpen(true)}} onRunSheet={()=>{setShareHubOpen(false); setRunSheetOpen(true)}} />}
       {shareOpen && <ShareScheduleModal data={data} workers={data.teamMembers} onClose={()=>setShareOpen(false)} />}
@@ -2970,7 +2977,7 @@ function JobPackImportsPage({onClose}){
   return <main className="reports-page"><section className="reports-page-shell"><div className="inventory-header"><div><h1><FolderInput size={28}/> Tradify job-pack imports</h1><p>Valid packs create draft jobs directly in To be scheduled. Cleared records remain linked to the job but are hidden from the active work list.</p></div><div className="report-actions"><button className="secondary" onClick={()=>load()}><RotateCcw size={15}/> Refresh and import</button><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div></div><div className="import-filter-row"><div className="search closeout-search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search file, job number, work order or status…"/></div><select value={filter} onChange={e=>setFilter(e.target.value)}><option value="active">Active</option><option value="pending">Pending</option><option value="need_review">Need review</option><option value="imported">Imported</option><option value="cleared">Cleared</option><option value="all">All</option></select></div><div className="closeout-list">{visible.map(r=>{const f=r.parsed_fields||{};return <article className={`closeout-row ${needReview(r)?"warning":""}`} key={r.id}><div><strong>{f.jobNumber?`Job ${f.jobNumber}`:"Job pending"}{f.workOrderNumber?` · WO ${f.workOrderNumber}`:""}</strong><span>{f.title||r.original_file_name}</span><em>Received {formatDateTime(r.received_at)}</em><small>Status: {r.is_cleared?"cleared · ":""}{r.import_status} / {r.processing_status}{r.error_message?` · ${r.error_message}`:""}</small></div><div className="closeout-actions"><button className="secondary" onClick={()=>openPdf(r)}><Download size={14}/> PDF</button>{!r.is_cleared&&r.import_status!=="imported"&&<button className="primary" disabled={working===r.id} onClick={()=>process(r)}>{working===r.id?"Importing…":"Parse and import"}</button>}{!r.is_cleared&&<button className="secondary" onClick={()=>clearRow(r)}>Clear</button>}{!r.job_id&&<button className="danger" onClick={()=>deleteRow(r)}><Trash2 size={14}/> Delete</button>}</div></article>})}{!visible.length&&<div className="empty">No job packs match this filter.</div>}</div></section></main>;
 }
 
-function SideNav({ unreadMessages, lowStockCount, isAdmin, hasStoresPermission, onCalendar, onShare, onMessages, onPeople, onReports, onCloseouts, onJobPacks, onTools, onInventory, onMachinery, onSettings }) {
+function SideNav({ unreadMessages, lowStockCount, isAdmin, hasStoresPermission, onCalendar, onShare, onMessages, onReports, onCloseouts, onJobPacks, onTools, onInventory, onMachinery, onSettings }) {
   return (
     <nav className="side-nav" aria-label="Main actions">
       <button title="Calendar / schedule" onClick={onCalendar}><CalendarDays size={22}/></button>
@@ -2978,7 +2985,6 @@ function SideNav({ unreadMessages, lowStockCount, isAdmin, hasStoresPermission, 
       {hasStoresPermission && <button title="Inventory management" onClick={onInventory} className="side-nav-message"><Forklift size={22}/>{lowStockCount > 0 && <span>{lowStockCount}</span>}</button>}
       {isAdmin && <button title="Share" onClick={onShare}><Share2 size={22}/></button>}
       {isAdmin && <button title="Messages" onClick={onMessages} className="side-nav-message"><Inbox size={22}/>{unreadMessages > 0 && <span>{unreadMessages}</span>}</button>}
-      {isAdmin && <button title="People" onClick={onPeople}><Users size={22}/></button>}
       {isAdmin && <button title="Reports" onClick={onReports}><BookOpen size={22}/></button>}
       <button title="Tool register" onClick={onTools}><Wrench size={22}/></button>
       <button title="Settings" onClick={onSettings}><Settings size={22}/></button>
@@ -2998,7 +3004,7 @@ function ReferenceDataModal({trades=[],sites=[],tags=[],onClose,onChanged}){
   return <div className="modal-backdrop"><div className="modal mini-modal reference-data-modal"><div className="modal-header"><div><h2>Sites, trades & tags</h2><p>Manage reusable scheduling and job reference lists.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div><div className="tool-detail-tabs">{Object.keys(lists).map(k=><button key={k} className={kind===k?"active":""} onClick={()=>setKind(k)}>{labels[k]}</button>)}</div><form className="reference-add-row" onSubmit={add}><input value={name} onChange={e=>setName(e.target.value)} placeholder={`Add ${kind === "tag" ? "job tag" : kind}...`}/><button className="primary"><Plus size={15}/> Add</button></form><div className="reference-list">{lists[kind].map(value=><div key={value}><strong>{value}</strong><div><button className="secondary" onClick={()=>rename(value)}><Pencil size={14}/> Rename</button><button className="danger" onClick={()=>archive(value)}><Trash2 size={14}/> Remove</button></div></div>)}{!lists[kind].length&&<div className="empty small">No active {labels[kind].toLowerCase()}.</div>}</div><div className="modal-actions"><button className="secondary" onClick={onClose}>Close</button></div></div></div>;
 }
 
-function SettingsModal({ currentUser, currentRole, isAdminUser, onManageReferences, activeView, isInstalledPwa, canPromptInstall, onInstall, onOpenCloseouts, onOpenJobPacks, onClose, onSetView, onChangePassword, onSignOut }) {
+function SettingsModal({ currentUser, currentRole, isAdminUser, onManagePeople, onManageReferences, activeView, isInstalledPwa, canPromptInstall, onInstall, onOpenCloseouts, onOpenJobPacks, onClose, onSetView, onChangePassword, onSignOut }) {
   return (
     <div className="modal-backdrop">
       <div className="modal mini-modal settings-menu-modal">
@@ -3007,7 +3013,9 @@ function SettingsModal({ currentUser, currentRole, isAdminUser, onManageReferenc
           {isAdminUser && <button type="button" className={activeView === "admin" ? "choice-card active" : "choice-card"} onClick={() => onSetView("admin")}><UserCog/><strong>Admin View</strong><span>Scheduling, dashboards, reports and administration.</span></button>}
           <button type="button" className={activeView === "employee" ? "choice-card active" : "choice-card"} onClick={() => onSetView("employee")}><Users/><strong>Trade View</strong><span>Assigned work, completion updates and tools.</span></button>
           {isAdminUser && <button type="button" className="choice-card" onClick={onOpenCloseouts}><ClipboardList/><strong>FastField close-outs</strong><span>Review, match, clear or remove incoming close-out documents.</span></button>}
-          {isAdminUser && <button type="button" className="choice-card" onClick={onOpenJobPacks}><FolderInput/><strong>Tradify job-pack imports</strong><span>Review job-pack imports, pending documents and items needing review.</span></button>}{isAdminUser && <button type="button" className="choice-card" onClick={onManageReferences}><SlidersHorizontal/><strong>Sites, trades & tags</strong><span>Add, rename or archive job sites, trade categories and reusable job tags.</span></button>}
+          {isAdminUser && <button type="button" className="choice-card" onClick={onOpenJobPacks}><FolderInput/><strong>Tradify job-pack imports</strong><span>Review job-pack imports, pending documents and items needing review.</span></button>}
+          {isAdminUser && <button type="button" className="choice-card" onClick={onManagePeople}><Users/><strong>People</strong><span>Manage employees, access, roster details and calendar order.</span></button>}
+          {isAdminUser && <button type="button" className="choice-card" onClick={onManageReferences}><SlidersHorizontal/><strong>Sites, trades & tags</strong><span>Add, rename or archive job sites, trade categories and reusable job tags.</span></button>}
           <button type="button" className="choice-card" onClick={onChangePassword}><Settings/><strong>Change password</strong><span>Set or update the password for this account.</span></button>
           <button type="button" className="choice-card" onClick={onSignOut}><X/><strong>Sign out</strong><span>Log out of AIM CG on this device.</span></button>
           <button type="button" className="choice-card" onClick={onInstall} disabled={isInstalledPwa}><Download/><strong>{isInstalledPwa ? "App Installed" : "Install AIM CG"}</strong><span>{isInstalledPwa ? "AIM CG is running as an installed app on this device." : canPromptInstall ? "Add an AIM CG icon to this device." : "Show instructions to add AIM CG to the home screen."}</span></button>

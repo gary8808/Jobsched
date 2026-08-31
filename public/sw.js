@@ -1,4 +1,4 @@
-const CACHE_NAME = "aim-cg-v51f-hotfix";
+const CACHE_NAME = "aim-cg-v51g";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./aim-logo.png", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", event => {
