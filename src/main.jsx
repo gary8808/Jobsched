@@ -1,5 +1,5 @@
 
-// AIM CG v51e - tag persistence, Trade inventory issue and mobile calendar hotfix
+// AIM CG v51f - robust tag save and simplified Trade schedule
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -1162,8 +1162,7 @@ function getDraggedJobId(e) {
     const exists = dataRef.current.jobs.some(j => j.id === jobToSave.id);
     let next = normaliseJob(jobToSave);
     next = logJob(next, exists ? "Updated" : "Created", exists ? "Job details saved." : "Job created.");
-    updateData(current => ({ ...current, jobs: exists ? current.jobs.map(j => j.id === next.id ? next : j) : [next, ...current.jobs] }));
-    setEditingJob(null);
+
     if (session && supabase) {
       try {
         setJobsSyncMessage("Saving job to Supabase...");
@@ -1173,13 +1172,21 @@ function getDraggedJobId(e) {
           await syncJobMachineryBookingsToSupabase(next.id, next.machineryBookings || []);
           await refreshMachineryData();
         }
+        updateData(current => ({ ...current, jobs: exists ? current.jobs.map(j => j.id === next.id ? next : j) : [next, ...current.jobs] }));
         setJobsSyncMessage(`Saved ${next.title || "job"} to Supabase.`);
+        setEditingJob(null);
+        return true;
       } catch (err) {
         console.error(err);
         setJobsSyncMessage(err?.message ? `Supabase job sync failed: ${err.message}` : "Supabase job sync failed.");
-        alert(err?.message || "Could not save job to Supabase.");
+        alert(err?.message || "Could not save job to Supabase. The job editor has been left open so you can retry.");
+        return false;
       }
     }
+
+    updateData(current => ({ ...current, jobs: exists ? current.jobs.map(j => j.id === next.id ? next : j) : [next, ...current.jobs] }));
+    setEditingJob(null);
+    return true;
   }
 
   function cancelOrDeleteJob(job) {
@@ -2508,6 +2515,7 @@ function JobModal({ job, teamMembers, tradeOptions = TRADES, siteOptions = BASE_
   const [smsStatus, setSmsStatus] = useState("");
   const [workerSearch,setWorkerSearch]=useState("");
   const [tagInput,setTagInput]=useState("");
+  const [savingJob,setSavingJob]=useState(false);
   const jobMessages = useMemo(
     () => [...(messages || [])]
       .filter((m) => m.jobId === form.id)
@@ -2614,7 +2622,43 @@ function JobModal({ job, teamMembers, tradeOptions = TRADES, siteOptions = BASE_
       setSmsSending(false);
     }
   }
-  function submit(e){ e.preventDefault(); if(!form.title.trim()){setActiveTab("details"); alert("Please enter a job title."); return;} const rows=form.machineryBookings||[]; for(const row of rows){ if(!row.machineId||!row.workerId||!row.startDate||!row.endDate){setActiveTab("scheduling");alert("Complete all machinery booking fields or remove the incomplete row.");return;} const machine=machines.find(m=>m.id===row.machineId); const storedBooking=machineryBookings.find(existing=>existing.id===row.id); const reservationUnchanged=Boolean(storedBooking&&storedBooking.machineId===row.machineId&&storedBooking.startDate===row.startDate&&(storedBooking.endDate||storedBooking.startDate)===(row.endDate||row.startDate)&&(storedBooking.period||"full_day")===(row.period||"full_day")); if(isMachineUnavailable(machine)&&!reservationUnchanged){setActiveTab("scheduling");alert(`${machineDisplayName(machine)} is unavailable and cannot be booked.`);return;} if(machineryConflict(row)){setActiveTab("scheduling");alert("A machinery booking conflicts with an existing booking.");return;} const duplicate=rows.find(other=>other.id!==row.id&&findMachineryConflict(row,[other])); if(duplicate){setActiveTab("scheduling");alert("Two machinery bookings on this job overlap for the same machine.");return;} } onSave(form); }
+  async function submit(e){
+    e.preventDefault();
+    if(savingJob)return;
+    if(!form.title.trim()){setActiveTab("details"); alert("Please enter a job title."); return;}
+    const rows=form.machineryBookings||[];
+    for(const row of rows){
+      if(!row.machineId||!row.workerId||!row.startDate||!row.endDate){setActiveTab("scheduling");alert("Complete all machinery booking fields or remove the incomplete row.");return;}
+      const machine=machines.find(m=>m.id===row.machineId);
+      const storedBooking=machineryBookings.find(existing=>existing.id===row.id);
+      const reservationUnchanged=Boolean(storedBooking&&storedBooking.machineId===row.machineId&&storedBooking.startDate===row.startDate&&(storedBooking.endDate||storedBooking.startDate)===(row.endDate||row.startDate)&&(storedBooking.period||"full_day")===(row.period||"full_day"));
+      if(isMachineUnavailable(machine)&&!reservationUnchanged){setActiveTab("scheduling");alert(`${machineDisplayName(machine)} is unavailable and cannot be booked.`);return;}
+      if(machineryConflict(row)){setActiveTab("scheduling");alert("A machinery booking conflicts with an existing booking.");return;}
+      const duplicate=rows.find(other=>other.id!==row.id&&findMachineryConflict(row,[other]));
+      if(duplicate){setActiveTab("scheduling");alert("Two machinery bookings on this job overlap for the same machine.");return;}
+    }
+
+    let nextForm=form;
+    const typed=tagInput.trim();
+    if(typed){
+      const reusable=(tagOptions||[]).find(tag=>tag.toLowerCase()===typed.toLowerCase());
+      const name=reusable||typed;
+      const exists=(form.tags||[]).some(tag=>tag.toLowerCase()===name.toLowerCase());
+      if(!exists) nextForm={...form,tags:[...(form.tags||[]),name]};
+      if(!reusable){
+        try{await onCreateTag(name);}catch(error){console.warn("Could not create reusable tag before saving job",error);}
+      }
+      setTagInput("");
+      setForm(nextForm);
+    }
+
+    setSavingJob(true);
+    try{
+      await onSave(nextForm);
+    } finally {
+      setSavingJob(false);
+    }
+  }
   return <div className="modal-backdrop"><form className="modal job-modal-tabs" onSubmit={submit}><div className="modal-header clean-modal-header"><div><h2>{job.title?"Edit job":"New job"}</h2><p>{form.jobNumber||form.workOrderNumber||form.poNumber||"Job details"}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div><div className="job-tab-bar">{tabs.map(t=><button type="button" key={t} className={activeTab===t?"active":""} onClick={()=>setActiveTab(t)}>{labelTab(t)}</button>)}</div>
   {activeTab==="details"&&<section className="job-tab-panel">{form.isAdHoc ? <label>Job description<textarea rows="8" value={form.notes||""} onChange={e=>update("notes",e.target.value)} placeholder="Describe the ad hoc task..."/></label> : form.isTravelComment ? <><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate",e.target.value)}/></label></div><label>Travel / accommodation title<input value={form.title||""} onChange={e=>update("title",e.target.value)}/></label><label>Travel / accommodation notes<textarea rows="8" value={form.notes||""} onChange={e=>update("notes",e.target.value)} placeholder="Flights, accommodation, hire car, check-in details..."/></label></> : <><div className="two-col"><label>Start date<input type="date" value={form.startDate||""} onChange={e=>updateStartDate(e.target.value)}/></label><label>End date<input type="date" value={form.endDate||""} onChange={e=>update("endDate", e.target.value && form.startDate && compareIsoDates(e.target.value, form.startDate) < 0 ? form.startDate : e.target.value)}/></label></div><label>Job title<input value={form.title} onChange={e=>update("title",e.target.value)}/></label><div className="two-col"><label>Client<input value={form.client||""} onChange={e=>update("client",e.target.value)}/></label><label>Address<input value={form.address||""} onChange={e=>update("address",e.target.value)}/></label></div><label>Site / area<select value={form.site||""} onChange={e=>update("site",e.target.value)}><option value="">Not set</option>{form.site&&!siteOptions.includes(form.site)&&<option value={form.site}>{form.site}</option>}{siteOptions.map(site=><option key={site}>{site}</option>)}</select></label><div className="two-col"><label>Job number<input value={form.jobNumber||""} onChange={e=>update("jobNumber",e.target.value)}/></label><label>Quote number<input value={form.quoteNumber||""} onChange={e=>update("quoteNumber",e.target.value)}/></label></div><div className="two-col"><label>Work order number<input value={form.workOrderNumber||""} onChange={e=>update("workOrderNumber",e.target.value)}/></label><label>PO number<input value={form.poNumber||""} onChange={e=>update("poNumber",e.target.value)}/></label></div>{isAdmin && <label>Job value excluding GST ($)<input type="number" min="0" step="0.01" value={form.jobValue ?? ""} onChange={e=>update("jobValue", e.target.value === "" ? "" : Number(e.target.value))}/></label>}<section className="job-tag-editor"><label>Tags<div className="tag-entry-row"><input list="job-tag-options" value={tagInput} onChange={e=>setTagInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"){e.preventDefault();addJobTag();}}} placeholder="Select or create tag, e.g. Access Anytime"/><datalist id="job-tag-options">{tagOptions.map(tag=><option key={tag} value={tag}/>)}</datalist><button type="button" className="secondary" onClick={addJobTag}><Plus size={14}/> Add</button></div></label>{(form.tags||[]).length>0&&<div className="job-tags editable-tags">{form.tags.map(tag=><span key={tag}>{tag}<button type="button" onClick={()=>removeJobTag(tag)} aria-label={`Remove ${tag}`}><X size={12}/></button></span>)}</div>}</section><label>Job description / scope<textarea rows="5" value={form.notes||""} onChange={e=>update("notes",e.target.value)}/></label><label>Work done summary<textarea rows="6" readOnly value={buildWorkDoneSummary(form, teamMembers)} placeholder="Employee completion notes and reassignment requests will appear here."/></label>{isAdmin && <><FastFieldJobCloseoutSummary jobId={form.id}/><JobRunningTimes job={form} workers={teamMembers}/></>}</>}</section>}
   {activeTab==="scheduling"&&<section className="job-tab-panel">
@@ -2644,7 +2688,7 @@ function JobModal({ job, teamMembers, tradeOptions = TRADES, siteOptions = BASE_
   </section>}
   {activeTab==="attachments"&&<section className="job-tab-panel"><div className="attachment-drop" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault(); addAttachments(e.dataTransfer.files||[]);}}><Paperclip size={24}/><strong>Drag files or photos here</strong><span>Files are uploaded to Supabase Storage and linked to this job.</span><label className="secondary file-pick">Choose files<input type="file" multiple disabled={attachmentUploading} onChange={e=>addAttachments(e.target.files||[])}/></label>{attachmentUploading && <span className="muted">Uploading...</span>}</div><div className="simple-list">{(form.attachments||[]).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button><button type="button" onClick={()=>setForm(cur=>({...cur,attachments:cur.attachments.filter(x=>x.id!==a.id)}))}><X size={14}/></button></div>)}</div></section>}
   {activeTab==="history"&&<section className="job-tab-panel"><HistoryList items={form.jobHistory||[]} type="history"/></section>}
-  <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary">Save job</button></div></form></div>
+  <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="submit" className="primary" disabled={savingJob}>{savingJob?"Saving...":"Save job"}</button></div></form></div>
 }
 
 function CalendarItemModal({ context, onClose, onSave }) {
@@ -3362,7 +3406,7 @@ function EmployeeView({ workerId, setWorkerId, workers, days, jobs, leaveRecords
   function updateCompletionDraft(jobId, field, value) {setCompletionSaveStatus(c=>({...c,[jobId]:"idle"}));setCompletionDrafts(c=>({...c,[jobId]:{completionDescription:"",materialsUsed:"",requiresAnotherTrade:false,followUpTrade:"",...(c[jobId]||{}),[field]:value}}));}
   async function saveCompletion(job) {const savedCompletion=job.workerCompletions?.[worker.id]||{};const existing=(!getCurrentVisitId(job)||savedCompletion.visitId===getCurrentVisitId(job))?savedCompletion:{};const draft=completionDrafts[job.id]||existing;setCompletionSaveStatus(c=>({...c,[job.id]:"saving"}));try{await onCompletion(job.id,worker.id,{completionDescription:draft.completionDescription||"",materialsUsed:draft.materialsUsed||"",requiresAnotherTrade:Boolean(draft.requiresAnotherTrade),followUpTrade:draft.followUpTrade||""});setCompletionSaveStatus(c=>({...c,[job.id]:"saved"}));setCompletionFor(null);}catch(err){console.error(err);setCompletionSaveStatus(c=>({...c,[job.id]:"error"}));alert(err?.message||"Could not save update.");}}
   if(!worker)return <main className="employee-view app-like-view"><section className="employee-app-header"><div><span className="app-kicker">Trade View</span><h2>Login not linked to an employee</h2><p>An administrator needs to link this login to the correct employee record in Manage Employees.</p></div></section></main>;
-  return <main className="employee-view app-like-view"><section className="employee-app-header"><div><span className="app-kicker">Trade schedule</span><h2>{worker.name||"Employee"}</h2><p>{worker.trade||"No trade"} · {worker.baseSite||"No site"}</p></div>{canSwitchWorker?<label>View as<select value={worker.id||""} onChange={e=>setWorkerId(e.target.value)}>{workers.map(w=><option key={w.id} value={w.id}>{w.name}</option>)}</select></label>:<span className="employee-role-pill">Trade access only</span>}</section>
+  return <main className="employee-view app-like-view"><section className="employee-app-header"><div><span className="app-kicker">Trade schedule</span><h2>{worker.name||"Employee"}</h2><p>{worker.trade||"No trade"} · {worker.baseSite||"No site"}</p></div><span className="employee-role-pill">Trade schedule</span></section>
   {showRunningReminder&&<section className="running-job-reminder"><AlertCircle size={20}/><div><strong>Job timer still running after 6:15 pm</strong><span>{runningJobs.map(j=>j.title).join(", ")} {runningJobs.length===1?"is":"are"} still accumulating time. Select the job and tap Offsite when finished.</span></div></section>}
   <div className="employee-range-tabs pill-tabs"><button className={range==="today"?"active":""} onClick={()=>setRange("today")}>Today</button><button className={range==="tomorrow"?"active":""} onClick={()=>setRange("tomorrow")}>Tomorrow</button><button className={range==="fortnight"?"active":""} onClick={()=>setRange("fortnight")}>Next 2 weeks</button></div>
   <section className="employee-list">{displayDays.map(day=>{const iso=getIsoDate(day);const availability=getWorkerAvailability(worker,iso,leaveRecords);const dayJobs=visible.filter(j=>jobOccursForWorkerOnDate(j,worker.id,iso)).sort(sortScheduleItems);return <div key={iso} className="employee-day"><h3>{formatIsoForDisplay(iso)} <span className={`roster-badge ${availability.status==="Onsite"?"onsite":"rnr"}`}>{availability.label}</span></h3>{dayJobs.map(job=>{const status=getCurrentWorkerStatus(job,worker.id);const expanded=expandedJobId===job.id;const savedCompletion=job.workerCompletions?.[worker.id]||{};const currentCompletion=(!getCurrentVisitId(job)||savedCompletion.visitId===getCurrentVisitId(job))?savedCompletion:{};const completion={completionDescription:"",materialsUsed:"",requiresAnotherTrade:false,followUpTrade:"",...currentCompletion,...(completionDrafts[job.id]||{})};return <article key={job.id} className={`employee-job-card app-job-card compact-trade-card ${expanded?"expanded":"collapsed"} ${isDefectJob(job)?"employee-defect-job":""} ${status==="completed"&&!isDefectJob(job)?"employee-complete":""}`}><button type="button" className="employee-job-banner trade-card-toggle" onClick={()=>setExpandedJobId(expanded?"":job.id)}><div><span className="wo">{job.workOrderNumber||job.jobNumber||"Job"}</span><h4>{job.title}</h4>{isDefectJob(job)&&<span className="employee-defect-pill">DEFECTS JOB</span>}</div><div className="trade-card-status">{!job.isTravelComment&&<span className={`status-dot ${status}`}>{STATUS_META[status].icon} {STATUS_META[status].label}</span>}<ChevronDown size={18}/></div></button>{expanded&&<div className="trade-card-expanded">{job.isAdHoc?<AdHocEmployeeCard job={job} worker={worker} status={status} onStatus={onStatus} onAddAttachment={onAddAttachment} onAddNote={onAddNote}/>:job.isTravelComment?<TravelEmployeeCard job={job}/>:<><p className="address-line">{job.address}</p><div className="employee-quick-info">{job.site&&<span>{job.site}</span>}<span>{jobTradeText(job)||"No trade set"}</span><span>Materials: {job.materialsStatus||"Parts from stock"}</span></div>{(job.tags||[]).length>0&&<div className="job-tags">{job.tags.map(tag=><span key={tag}>{tag}</span>)}</div>}{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).length>0&&<div className="employee-machinery-panel"><strong><Tractor size={15}/> Machinery assigned</strong>{machineryBookings.filter(b=>b.jobId===job.id&&b.workerId===worker.id&&isDateWithinRange(iso,b.startDate,b.endDate)).map(b=>{const machine=machines.find(m=>m.id===b.machineId);return <span key={b.id}>{machine?machineDisplayName(machine):(b.description||`Machinery asset ${String(b.machineId||"").slice(0,8)}`)} · {b.period==="full_day"?"Full day":b.period.toUpperCase()}</span>})}</div>}<div className="employee-actions primary-actions-row"><a className="secondary" href={job.clientPhone?`tel:${job.clientPhone}`:undefined} onClick={e=>{if(!job.clientPhone){e.preventDefault();alert("No client phone number saved.");}}}><Phone size={16}/> Call site contact</a><button className="secondary" onClick={()=>onStatus(job.id,worker.id,"running")}><Play size={16}/> Onsite</button><button className="secondary" onClick={()=>onStatus(job.id,worker.id,"stopped")}><Square size={16}/> Offsite</button><button className="secondary" onClick={()=>onStatus(job.id,worker.id,status==="completed"?"notStarted":"completed")}><CheckCircle2 size={16}/> {status==="completed"?"Mark incomplete":"Complete"}</button></div><p className="time-total"><Clock size={14}/> Total running time: {formatDuration(getWorkerTotalMs(job,worker.id))}</p><div className="employee-card-tabs"><details open><summary>Job description</summary><pre>{job.notes}</pre></details><details><summary>Job notes</summary>{(job.noteHistory||[]).filter(n=>n.showInTradeView).map(n=><div key={n.id} className="trade-note"><strong>{n.user}</strong><span>{formatDateTime(n.date)}</span><p>{n.text}</p></div>)}{!(job.noteHistory||[]).some(n=>n.showInTradeView)&&<p>No notes shared with Trade View.</p>}</details><details><summary>Materials list</summary><TradeJobMaterials job={job}/></details><details><summary>Photos</summary><div className="photo-upload-row"><label className="secondary file-pick">Upload photos<input type="file" accept="image/*" multiple onChange={e=>onAddAttachment(job.id,worker.id,e.target.files||[])}/></label><label className="secondary file-pick">Camera<input type="file" accept="image/*" capture="environment" onChange={e=>onAddAttachment(job.id,worker.id,e.target.files||[])}/></label></div><div className="simple-list">{(job.attachments||[]).map(a=><div key={a.id}><span>{a.name} · {formatBytes(a.size)}</span><button type="button" className="mini-action" onClick={()=>openStoredAttachment(a)}><Download size={14}/> Open</button></div>)}{!(job.attachments||[]).length&&<p>No photos/files added.</p>}</div></details><details open={completionFor===job.id}><summary onClick={()=>setCompletionFor(completionFor===job.id?null:job.id)}>Job completion</summary><label>Description of works<textarea rows="4" value={completion.completionDescription||""} onChange={e=>updateCompletionDraft(job.id,"completionDescription",e.target.value)} placeholder="Describe the works completed..."/></label><label className="check-option plain"><input type="checkbox" checked={Boolean(completion.requiresAnotherTrade)} onChange={e=>updateCompletionDraft(job.id,"requiresAnotherTrade",e.target.checked)}/>Notify supervisors that this portion is complete but another trade is required</label>{completion.requiresAnotherTrade&&<label>Trade required<select value={completion.followUpTrade||""} onChange={e=>updateCompletionDraft(job.id,"followUpTrade",e.target.value)}><option value="">Select trade</option>{tradeOptions.map(t=><option key={t}>{t}</option>)}</select></label>}<p className="muted">Use the Save update button below to save completion details.</p></details></div><div className="employee-save-row"><button className={`primary ${completionSaveStatus[job.id]==="saved"?"save-success":""}`} onClick={()=>saveCompletion(job)} disabled={completionSaveStatus[job.id]==="saving"}>{completionSaveStatus[job.id]==="saving"?"Saving...":completionSaveStatus[job.id]==="saved"?"Saved":"Save update"}</button>{completionSaveStatus[job.id]==="error"&&<span className="save-error">Not saved</span>}</div></>}</div>}</article>})}{!dayJobs.length&&<p className="muted">No jobs scheduled.</p>}</div>})}</section></main>;
