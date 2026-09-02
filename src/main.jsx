@@ -1,5 +1,5 @@
 
-// AIM CG v52 - inventory QR labels and scan-to-job workflow
+// AIM CG v52a - live QR scanning and searchable scan-to-job workflow
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -131,12 +131,89 @@ function TradeJobMaterials({ job }) {
   </div>;
 }
 
+function LiveQrScanner({onDetected,onClose}){
+  const videoRef=useRef(null);
+  const canvasRef=useRef(null);
+  const streamRef=useRef(null);
+  const animationRef=useRef(0);
+  const detectedRef=useRef(false);
+  const [status,setStatus]=useState("Starting camera…");
+
+  useEffect(()=>{
+    let disposed=false;
+    let lastScan=0;
+    let scanBusy=false;
+    let detector=null;
+    if(window.BarcodeDetector){try{detector=new window.BarcodeDetector({formats:["qr_code"]});}catch{detector=null;}}
+    async function start(){
+      if(!navigator.mediaDevices?.getUserMedia){setStatus("Live camera scanning is not supported on this device. Search the item manually instead.");return;}
+      try{
+        const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:{ideal:"environment"}},audio:false});
+        if(disposed){stream.getTracks().forEach(track=>track.stop());return;}
+        streamRef.current=stream;
+        const video=videoRef.current;
+        if(!video)return;
+        video.srcObject=stream;
+        video.setAttribute("playsinline","");
+        await video.play();
+        setStatus("Point the camera at the material QR code.");
+        const loop=async now=>{
+          if(disposed||detectedRef.current)return;
+          animationRef.current=requestAnimationFrame(loop);
+          if(scanBusy||now-lastScan<180||video.readyState<2||!video.videoWidth||!video.videoHeight)return;
+          lastScan=now;
+          scanBusy=true;
+          let raw="";
+          if(detector){
+            try{
+              const codes=await detector.detect(video);
+              raw=codes?.[0]?.rawValue||"";
+            }catch{}
+          }
+          if(!raw){
+            const canvas=canvasRef.current;
+            if(!canvas)return;
+            const maxWidth=760;
+            const scale=Math.min(1,maxWidth/video.videoWidth);
+            canvas.width=Math.max(1,Math.round(video.videoWidth*scale));
+            canvas.height=Math.max(1,Math.round(video.videoHeight*scale));
+            const ctx=canvas.getContext("2d",{willReadFrequently:true});
+            ctx.drawImage(video,0,0,canvas.width,canvas.height);
+            const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
+            raw=jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:"attemptBoth"})?.data||"";
+          }
+          scanBusy=false;
+          if(raw&&!detectedRef.current){
+            detectedRef.current=true;
+            setStatus("QR code recognised.");
+            onDetected(raw);
+          }
+        };
+        animationRef.current=requestAnimationFrame(loop);
+      }catch(err){
+        console.error(err);
+        const denied=err?.name==="NotAllowedError"||err?.name==="PermissionDeniedError";
+        setStatus(denied?"Camera access was not allowed. Search the item manually instead.":"Could not start the camera. Search the item manually instead.");
+      }
+    }
+    start();
+    return()=>{
+      disposed=true;
+      if(animationRef.current)cancelAnimationFrame(animationRef.current);
+      streamRef.current?.getTracks?.().forEach(track=>track.stop());
+      streamRef.current=null;
+    };
+  },[onDetected]);
+
+  return <section className="live-qr-scanner"><div className="live-qr-video-wrap"><video ref={videoRef} muted playsInline/><div className="live-qr-guide"><span/></div></div><canvas ref={canvasRef} className="live-qr-canvas"/><p className="muted">{status}</p><button type="button" className="secondary" onClick={onClose}>Cancel scan</button></section>;
+}
+
 function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
   const [query,setQuery]=useState("");
   const [selectedKey,setSelectedKey]=useState("");
   const [quantity,setQuantity]=useState("1");
-  const [qrValue,setQrValue]=useState("");
   const [scanStatus,setScanStatus]=useState("");
+  const [scannerOpen,setScannerOpen]=useState(false);
   const [selectionSource,setSelectionSource]=useState("manual");
   const [saving,setSaving]=useState(false);
   const active=(catalog||[]);
@@ -147,45 +224,19 @@ function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
   const selected=active.find(row=>`${row.itemId}:${row.locationId}`===selectedKey)||null;
 
   function resolveQr(raw){
-    const text=String(raw||"").trim();if(!text)return;
+    const text=String(raw||"").trim();if(!text)return false;
     let candidates=[text];
     try{const url=new URL(text);candidates.push(url.searchParams.get("stock")||"",url.searchParams.get("item")||"",url.searchParams.get("qr")||"");const parts=url.pathname.split("/").filter(Boolean);if(parts.length)candidates.push(parts[parts.length-1]);}catch{}
     const lowered=candidates.filter(Boolean).map(v=>String(v).trim().toLowerCase());
     const row=active.find(r=>lowered.some(v=>[r.qrCode,r.itemNumber,r.itemId].some(x=>String(x||"").trim().toLowerCase()===v)));
-    if(!row){setScanStatus("QR code did not match an active stock item.");return;}
-    setSelectedKey(`${row.itemId}:${row.locationId}`);setQuery(row.itemName);setSelectionSource("qr");setScanStatus(`Selected ${row.itemName} · ${row.locationName}`);
+    if(!row){setScanStatus("QR code did not match an active stock item. Search the item manually instead.");return false;}
+    setSelectedKey(`${row.itemId}:${row.locationId}`);setQuery(row.itemName);setSelectionSource("qr");setScanStatus(`Selected ${row.itemName} · ${row.locationName}`);return true;
   }
 
-  async function scanImage(file){
-    if(!file)return;
-    setScanStatus("Reading QR code…");
-    try{
-      let raw="";
-      if(window.BarcodeDetector&&window.createImageBitmap){
-        try{
-          const detector=new window.BarcodeDetector({formats:["qr_code"]});
-          const bitmap=await createImageBitmap(file);
-          const codes=await detector.detect(bitmap);
-          if(bitmap.close)bitmap.close();
-          raw=codes?.[0]?.rawValue||"";
-        }catch{}
-      }
-      if(!raw){
-        const bitmap=await createImageBitmap(file);
-        const maxSide=1400;
-        const scale=Math.min(1,maxSide/Math.max(bitmap.width,bitmap.height));
-        const canvas=document.createElement("canvas");
-        canvas.width=Math.max(1,Math.round(bitmap.width*scale));canvas.height=Math.max(1,Math.round(bitmap.height*scale));
-        const ctx=canvas.getContext("2d",{willReadFrequently:true});
-        ctx.drawImage(bitmap,0,0,canvas.width,canvas.height);
-        if(bitmap.close)bitmap.close();
-        const imageData=ctx.getImageData(0,0,canvas.width,canvas.height);
-        raw=jsQR(imageData.data,imageData.width,imageData.height,{inversionAttempts:"attemptBoth"})?.data||"";
-      }
-      if(!raw)throw new Error("No QR code was detected. Move closer to the label and try again.");
-      setQrValue(raw);resolveQr(raw);
-    }catch(err){setScanStatus(err?.message||"Could not read QR code.");}
-  }
+  const handleDetected=React.useCallback(raw=>{
+    const matched=resolveQr(raw);
+    if(matched)setScannerOpen(false);
+  },[active]);
 
   async function save(){
     if(!selected){alert("Select a material first.");return;}
@@ -199,14 +250,13 @@ function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
   }
 
   return <div className="nested-modal"><div className="modal mini-modal trade-material-modal"><div className="modal-header"><div><h2>Add materials</h2><p>{job.jobNumber||job.workOrderNumber||"Job"} · {job.title}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div>
-    <section className="qr-issue-panel"><strong><QrCode size={17}/> Scan QR code</strong><p className="muted">On supported devices, photograph the material QR label. You can also enter the QR/item code manually.</p><div className="qr-actions"><label className="secondary file-pick"><QrCode size={15}/> Scan QR<input type="file" accept="image/*" capture="environment" onChange={e=>scanImage(e.target.files?.[0])}/></label><input value={qrValue} onChange={e=>setQrValue(e.target.value)} placeholder="QR / item code"/><button type="button" className="secondary" onClick={()=>resolveQr(qrValue)}>Use code</button></div>{scanStatus&&<p className="muted">{scanStatus}</p>}</section>
+    <section className="qr-issue-panel"><strong><QrCode size={17}/> Scan QR code</strong><p className="muted">Use the live camera scanner, or search the material manually by item number or name.</p>{scannerOpen?<LiveQrScanner onDetected={handleDetected} onClose={()=>setScannerOpen(false)}/>:<button type="button" className="secondary live-qr-start" onClick={()=>{setScanStatus("");setScannerOpen(true);}}><QrCode size={15}/> Start live scanner</button>}{scanStatus&&<p className="muted">{scanStatus}</p>}</section>
     <label>Search material<input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Item number, product name or location…"/></label>
     <div className="trade-material-results">{filtered.map(row=><button type="button" key={`${row.itemId}:${row.locationId}`} className={selectedKey===`${row.itemId}:${row.locationId}`?"selected":""} onClick={()=>{setSelectedKey(`${row.itemId}:${row.locationId}`);setSelectionSource("manual");}}><strong>{row.itemNumber} · {row.itemName}</strong><span>{row.locationName||"Location not set"}</span><em>{row.quantityAvailable} {row.unitOfMeasure} available</em></button>)}{!filtered.length&&<div className="empty small">No available materials match.</div>}</div>
     {selected&&<div className="selected-material-issue"><div><strong>{selected.itemName}</strong><span>{selected.itemNumber} · {selected.locationName}</span><em>{selected.quantityAvailable} {selected.unitOfMeasure} available</em></div><label>Quantity to add<input type="number" min="0.01" step="0.01" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label></div>}
     <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="primary" disabled={!selected||Number(selected?.quantityAvailable)<=0||saving} onClick={save}>{saving?"Adding…":"Add to job"}</button></div>
   </div></div>;
 }
-
 
 function inventoryQrPayload(itemId){
   const base=`${window.location.origin}${import.meta.env.BASE_URL}`;
@@ -258,6 +308,7 @@ function ScannedStockIssueModal({stockId,jobs,worker,hasStoresPermission,onClose
   const [loading,setLoading]=useState(true);
   const [selectedKey,setSelectedKey]=useState("");
   const [jobId,setJobId]=useState("");
+  const [jobQuery,setJobQuery]=useState("");
   const [quantity,setQuantity]=useState("1");
   const [saving,setSaving]=useState(false);
   const [error,setError]=useState("");
@@ -265,8 +316,11 @@ function ScannedStockIssueModal({stockId,jobs,worker,hasStoresPermission,onClose
   const matched=catalog.filter(r=>String(r.itemId)===String(stockId)||String(r.qrCode).toLowerCase()===String(stockId).toLowerCase()||String(r.itemNumber).toLowerCase()===String(stockId).toLowerCase());
   const selected=catalog.find(r=>`${r.itemId}:${r.locationId}`===selectedKey)||matched[0]||null;
   const availableJobs=(jobs||[]).filter(j=>j.category!=="Cancelled"&&j.category!=="Completed"&&(hasStoresPermission||Boolean(worker?.id&&(j.assignedTo||[]).includes(worker.id))));
+  const q=jobQuery.trim().toLowerCase();
+  const matchingJobs=availableJobs.filter(j=>!q||jobSearchText(j).includes(q)).slice(0,40);
+  const selectedJob=availableJobs.find(j=>j.id===jobId)||null;
   async function save(){if(!selected||!jobId)return;const qty=Number(quantity);if(!Number.isFinite(qty)||qty<=0){alert("Enter a quantity greater than zero.");return;}if(qty>Number(selected.quantityAvailable)){alert(`Only ${selected.quantityAvailable} ${selected.unitOfMeasure} available at this location.`);return;}setSaving(true);try{await issueTradeInventoryToJob({jobId,itemId:selected.itemId,locationId:selected.locationId,quantity:qty,source:"qr"});await onSaved?.();onClose();}catch(err){alert(err?.message||"Could not issue this material.");}finally{setSaving(false);}}
-  return <div className="modal-backdrop scanned-stock-backdrop"><div className="modal mini-modal"><div className="modal-header"><div><h2>Scanned material</h2><p>Issue this stock item directly to a job.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>{loading?<p>Loading material…</p>:error?<p className="save-error">{error}</p>:<>{matched.length>1&&<label>Stock location<select value={selectedKey} onChange={e=>setSelectedKey(e.target.value)}>{matched.map(r=><option key={`${r.itemId}:${r.locationId}`} value={`${r.itemId}:${r.locationId}`}>{r.locationName} · {r.quantityAvailable} {r.unitOfMeasure} available</option>)}</select></label>}{selected&&<div className="scanned-stock-card"><QrCode size={30}/><div><strong>{selected.itemNumber} · {selected.itemName}</strong><span>{selected.locationName||"Location not set"}</span><em>{selected.quantityAvailable} {selected.unitOfMeasure} available</em></div></div>}<label>Job<select value={jobId} onChange={e=>setJobId(e.target.value)}><option value="">Select job</option>{availableJobs.map(j=><option key={j.id} value={j.id}>{j.jobNumber||j.workOrderNumber||"Job"} · {j.title}</option>)}</select></label>{!availableJobs.length&&<p className="muted">No active jobs are currently assigned to this login.</p>}<label>Quantity<input type="number" min="0.01" step="0.01" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label></>}<div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={loading||Boolean(error)||!selected||!jobId||saving} onClick={save}>{saving?"Adding…":"Add to job"}</button></div></div></div>;
+  return <div className="modal-backdrop scanned-stock-backdrop"><div className="modal mini-modal"><div className="modal-header"><div><h2>Scanned material</h2><p>Issue this stock item directly to a job.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>{loading?<p>Loading material…</p>:error?<p className="save-error">{error}</p>:<>{matched.length>1&&<label>Stock location<select value={selectedKey} onChange={e=>setSelectedKey(e.target.value)}>{matched.map(r=><option key={`${r.itemId}:${r.locationId}`} value={`${r.itemId}:${r.locationId}`}>{r.locationName} · {r.quantityAvailable} {r.unitOfMeasure} available</option>)}</select></label>}{selected&&<div className="scanned-stock-card"><QrCode size={30}/><div><strong>{selected.itemNumber} · {selected.itemName}</strong><span>{selected.locationName||"Location not set"}</span><em>{selected.quantityAvailable} {selected.unitOfMeasure} available</em></div></div>}<div className="job-search-picker"><label>Search job<input value={jobQuery} onChange={e=>{setJobQuery(e.target.value);setJobId("");}} placeholder="Job number, work order, title, client or site…"/></label>{selectedJob&&<div className="selected-job-chip">Selected: {formatJobSearchLabel(selectedJob)}</div>}<div className="job-search-results scanned-job-results">{matchingJobs.map(j=><button type="button" key={j.id} className={jobId===j.id?"selected":""} onClick={()=>{setJobId(j.id);setJobQuery(formatJobSearchLabel(j));}}><strong>{j.jobNumber||j.workOrderNumber||"Job"}</strong><span>{j.title}</span><small>{[j.client,j.site,j.workOrderNumber&&`WO ${j.workOrderNumber}`].filter(Boolean).join(" · ")}</small></button>)}{jobQuery&&!jobId&&!matchingJobs.length&&<p>No matching jobs.</p>}</div></div>{!availableJobs.length&&<p className="muted">No active jobs are currently assigned to this login.</p>}<label>Quantity<input type="number" min="0.01" step="0.01" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label></>}<div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={loading||Boolean(error)||!selected||!jobId||saving} onClick={save}>{saving?"Adding…":"Add to job"}</button></div></div></div>;
 }
 
 function App() {
