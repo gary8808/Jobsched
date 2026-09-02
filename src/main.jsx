@@ -1,5 +1,5 @@
 
-// AIM CG v51f - robust tag save and simplified Trade schedule
+// AIM CG v52 - inventory QR labels and scan-to-job workflow
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
@@ -11,6 +11,7 @@ import {
 import * as pdfjsLib from "pdfjs-dist";
 import * as XLSX from "xlsx";
 import jsQR from "jsqr";
+import QRCode from "qrcode";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 import "./styles.css";
 import { supabase, supabaseConfig } from "./supabaseClient";
@@ -136,6 +137,7 @@ function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
   const [quantity,setQuantity]=useState("1");
   const [qrValue,setQrValue]=useState("");
   const [scanStatus,setScanStatus]=useState("");
+  const [selectionSource,setSelectionSource]=useState("manual");
   const [saving,setSaving]=useState(false);
   const active=(catalog||[]);
   const filtered=active.filter(row=>{
@@ -151,7 +153,7 @@ function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
     const lowered=candidates.filter(Boolean).map(v=>String(v).trim().toLowerCase());
     const row=active.find(r=>lowered.some(v=>[r.qrCode,r.itemNumber,r.itemId].some(x=>String(x||"").trim().toLowerCase()===v)));
     if(!row){setScanStatus("QR code did not match an active stock item.");return;}
-    setSelectedKey(`${row.itemId}:${row.locationId}`);setQuery(row.itemName);setScanStatus(`Selected ${row.itemName} · ${row.locationName}`);
+    setSelectedKey(`${row.itemId}:${row.locationId}`);setQuery(row.itemName);setSelectionSource("qr");setScanStatus(`Selected ${row.itemName} · ${row.locationName}`);
   }
 
   async function scanImage(file){
@@ -191,7 +193,7 @@ function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
     const qty=Number(quantity);if(!Number.isFinite(qty)||qty<=0){alert("Enter a quantity greater than zero.");return;}
     if(qty>Number(selected.quantityAvailable)){alert(`Only ${selected.quantityAvailable} ${selected.unitOfMeasure} available at this location.`);return;}
     setSaving(true);
-    try{await issueTradeInventoryToJob({jobId:job.id,itemId:selected.itemId,locationId:selected.locationId,quantity:qty});await onSaved();}
+    try{await issueTradeInventoryToJob({jobId:job.id,itemId:selected.itemId,locationId:selected.locationId,quantity:qty,source:selectionSource});await onSaved();}
     catch(err){console.error(err);alert(err?.message||"Could not add material to the job.");}
     finally{setSaving(false);}
   }
@@ -199,10 +201,72 @@ function TradeMaterialIssueModal({job,catalog,onClose,onSaved}){
   return <div className="nested-modal"><div className="modal mini-modal trade-material-modal"><div className="modal-header"><div><h2>Add materials</h2><p>{job.jobNumber||job.workOrderNumber||"Job"} · {job.title}</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div>
     <section className="qr-issue-panel"><strong><QrCode size={17}/> Scan QR code</strong><p className="muted">On supported devices, photograph the material QR label. You can also enter the QR/item code manually.</p><div className="qr-actions"><label className="secondary file-pick"><QrCode size={15}/> Scan QR<input type="file" accept="image/*" capture="environment" onChange={e=>scanImage(e.target.files?.[0])}/></label><input value={qrValue} onChange={e=>setQrValue(e.target.value)} placeholder="QR / item code"/><button type="button" className="secondary" onClick={()=>resolveQr(qrValue)}>Use code</button></div>{scanStatus&&<p className="muted">{scanStatus}</p>}</section>
     <label>Search material<input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Item number, product name or location…"/></label>
-    <div className="trade-material-results">{filtered.map(row=><button type="button" key={`${row.itemId}:${row.locationId}`} className={selectedKey===`${row.itemId}:${row.locationId}`?"selected":""} onClick={()=>setSelectedKey(`${row.itemId}:${row.locationId}`)}><strong>{row.itemNumber} · {row.itemName}</strong><span>{row.locationName||"Location not set"}</span><em>{row.quantityAvailable} {row.unitOfMeasure} available</em></button>)}{!filtered.length&&<div className="empty small">No available materials match.</div>}</div>
+    <div className="trade-material-results">{filtered.map(row=><button type="button" key={`${row.itemId}:${row.locationId}`} className={selectedKey===`${row.itemId}:${row.locationId}`?"selected":""} onClick={()=>{setSelectedKey(`${row.itemId}:${row.locationId}`);setSelectionSource("manual");}}><strong>{row.itemNumber} · {row.itemName}</strong><span>{row.locationName||"Location not set"}</span><em>{row.quantityAvailable} {row.unitOfMeasure} available</em></button>)}{!filtered.length&&<div className="empty small">No available materials match.</div>}</div>
     {selected&&<div className="selected-material-issue"><div><strong>{selected.itemName}</strong><span>{selected.itemNumber} · {selected.locationName}</span><em>{selected.quantityAvailable} {selected.unitOfMeasure} available</em></div><label>Quantity to add<input type="number" min="0.01" step="0.01" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label></div>}
     <div className="modal-actions"><button type="button" className="secondary" onClick={onClose}>Cancel</button><button type="button" className="primary" disabled={!selected||Number(selected?.quantityAvailable)<=0||saving} onClick={save}>{saving?"Adding…":"Add to job"}</button></div>
   </div></div>;
+}
+
+
+function inventoryQrPayload(itemId){
+  const base=`${window.location.origin}${import.meta.env.BASE_URL}`;
+  const url=new URL(base,window.location.origin);
+  url.searchParams.set("stock",itemId);
+  return url.toString();
+}
+
+function escapePrintHtml(value){
+  return String(value??"").replace(/[&<>"']/g,ch=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[ch]));
+}
+
+async function printInventoryLabels(items,locations=[]){
+  const printable=(items||[]).filter(item=>isUuid(item?.id)&&item.active!==false);
+  if(!printable.length){alert("Select at least one active inventory item to print.");return;}
+  const labels=[];
+  for(const item of printable){
+    const payload=inventoryQrPayload(item.id);
+    const svg=await QRCode.toString(payload,{type:"svg",errorCorrectionLevel:"M",margin:1,width:180});
+    const location=locations.find(l=>l.id===item.defaultLocationId)?.name||item.defaultLocationName||"Location not set";
+    labels.push(`<section class="stock-label"><div class="label-copy"><strong>${escapePrintHtml(item.name)}</strong><span>${escapePrintHtml(item.itemNumber)}</span><small>${escapePrintHtml(location)}</small></div><div class="label-qr">${svg}</div></section>`);
+  }
+  const popup=window.open("","_blank","width=900,height=700");
+  if(!popup){alert("Your browser blocked the label print window. Allow pop-ups for Jobsched and try again.");return;}
+  popup.document.write(`<!doctype html><html><head><title>AIM inventory QR labels</title><style>
+    @page{size:62mm 45mm;margin:0}*{box-sizing:border-box}body{margin:0;font-family:Arial,sans-serif;color:#111}.stock-label{width:62mm;height:45mm;padding:3mm;display:flex;align-items:center;gap:2mm;page-break-after:always;overflow:hidden}.label-copy{width:31mm;display:flex;flex-direction:column;gap:1.5mm}.label-copy strong{font-size:11pt;line-height:1.12;max-height:25mm;overflow:hidden}.label-copy span{font-size:9pt;font-weight:700}.label-copy small{font-size:7.5pt;line-height:1.1}.label-qr{width:25mm;height:25mm;margin-left:auto;display:flex;align-items:center;justify-content:center}.label-qr svg{width:25mm;height:25mm}.stock-label:last-child{page-break-after:auto}@media screen{body{background:#eee}.stock-label{background:white;margin:6mm auto;box-shadow:0 1px 5px #999}}
+  </style></head><body>${labels.join("")}<script>window.addEventListener('load',()=>setTimeout(()=>window.print(),250));<\/script></body></html>`);
+  popup.document.close();
+}
+
+function InventoryLabelPrintModal({items,locations,onClose}){
+  const [query,setQuery]=useState("");
+  const [selected,setSelected]=useState(()=>new Set());
+  const active=(items||[]).filter(i=>i.active!==false&&isUuid(i.id));
+  const visible=active.filter(i=>{const q=query.trim().toLowerCase();return !q||[i.itemNumber,i.name,i.category,i.brand,locations.find(l=>l.id===i.defaultLocationId)?.name].some(v=>String(v||"").toLowerCase().includes(q));});
+  const toggle=id=>setSelected(cur=>{const n=new Set(cur);n.has(id)?n.delete(id):n.add(id);return n;});
+  const selectVisible=()=>setSelected(cur=>{const n=new Set(cur);visible.forEach(i=>n.add(i.id));return n;});
+  const clear=()=>setSelected(new Set());
+  const chosen=active.filter(i=>selected.has(i.id));
+  return <div className="modal-backdrop"><div className="modal inventory-label-modal"><div className="modal-header"><div><h2>Print inventory QR labels</h2><p>62 × 45 mm labels · product, item number, location and permanent stock QR.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>
+    <div className="inventory-label-toolbar"><div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search materials or locations…"/></div><button type="button" className="secondary" onClick={selectVisible}>Select shown</button><button type="button" className="secondary" onClick={clear}>Clear</button></div>
+    <div className="inventory-label-list">{visible.map(item=>{const loc=locations.find(l=>l.id===item.defaultLocationId);return <label key={item.id} className="inventory-label-row"><input type="checkbox" checked={selected.has(item.id)} onChange={()=>toggle(item.id)}/><div><strong>{item.itemNumber} · {item.name}</strong><span>{loc?.name||item.defaultLocationName||"Location not set"}</span></div><QrCode size={20}/></label>})}{!visible.length&&<div className="empty">No active materials match.</div>}</div>
+    <div className="modal-actions"><span>{chosen.length} label{chosen.length===1?"":"s"} selected</span><span className="modal-action-spacer"/><button type="button" className="secondary" onClick={onClose}>Close</button><button type="button" className="primary" disabled={!chosen.length} onClick={()=>printInventoryLabels(chosen,locations)}><Printer size={15}/> Print labels</button></div>
+  </div></div>;
+}
+
+function ScannedStockIssueModal({stockId,jobs,worker,hasStoresPermission,onClose,onSaved}){
+  const [catalog,setCatalog]=useState([]);
+  const [loading,setLoading]=useState(true);
+  const [selectedKey,setSelectedKey]=useState("");
+  const [jobId,setJobId]=useState("");
+  const [quantity,setQuantity]=useState("1");
+  const [saving,setSaving]=useState(false);
+  const [error,setError]=useState("");
+  useEffect(()=>{let alive=true;(async()=>{try{const rows=await fetchTradeInventoryCatalogFromSupabase();if(!alive)return;setCatalog(rows);const key=String(stockId||"").trim().toLowerCase();const first=rows.find(r=>[r.itemId,r.qrCode,r.itemNumber].some(v=>String(v||"").trim().toLowerCase()===key));if(first)setSelectedKey(`${first.itemId}:${first.locationId}`);else setError("This QR code does not match an active inventory item.");}catch(err){if(alive)setError(err?.message||"Could not load this material.");}finally{if(alive)setLoading(false);}})();return()=>{alive=false};},[stockId]);
+  const matched=catalog.filter(r=>String(r.itemId)===String(stockId)||String(r.qrCode).toLowerCase()===String(stockId).toLowerCase()||String(r.itemNumber).toLowerCase()===String(stockId).toLowerCase());
+  const selected=catalog.find(r=>`${r.itemId}:${r.locationId}`===selectedKey)||matched[0]||null;
+  const availableJobs=(jobs||[]).filter(j=>j.category!=="Cancelled"&&j.category!=="Completed"&&(hasStoresPermission||Boolean(worker?.id&&(j.assignedTo||[]).includes(worker.id))));
+  async function save(){if(!selected||!jobId)return;const qty=Number(quantity);if(!Number.isFinite(qty)||qty<=0){alert("Enter a quantity greater than zero.");return;}if(qty>Number(selected.quantityAvailable)){alert(`Only ${selected.quantityAvailable} ${selected.unitOfMeasure} available at this location.`);return;}setSaving(true);try{await issueTradeInventoryToJob({jobId,itemId:selected.itemId,locationId:selected.locationId,quantity:qty,source:"qr"});await onSaved?.();onClose();}catch(err){alert(err?.message||"Could not issue this material.");}finally{setSaving(false);}}
+  return <div className="modal-backdrop scanned-stock-backdrop"><div className="modal mini-modal"><div className="modal-header"><div><h2>Scanned material</h2><p>Issue this stock item directly to a job.</p></div><button className="icon" onClick={onClose}><X size={18}/></button></div>{loading?<p>Loading material…</p>:error?<p className="save-error">{error}</p>:<>{matched.length>1&&<label>Stock location<select value={selectedKey} onChange={e=>setSelectedKey(e.target.value)}>{matched.map(r=><option key={`${r.itemId}:${r.locationId}`} value={`${r.itemId}:${r.locationId}`}>{r.locationName} · {r.quantityAvailable} {r.unitOfMeasure} available</option>)}</select></label>}{selected&&<div className="scanned-stock-card"><QrCode size={30}/><div><strong>{selected.itemNumber} · {selected.itemName}</strong><span>{selected.locationName||"Location not set"}</span><em>{selected.quantityAvailable} {selected.unitOfMeasure} available</em></div></div>}<label>Job<select value={jobId} onChange={e=>setJobId(e.target.value)}><option value="">Select job</option>{availableJobs.map(j=><option key={j.id} value={j.id}>{j.jobNumber||j.workOrderNumber||"Job"} · {j.title}</option>)}</select></label>{!availableJobs.length&&<p className="muted">No active jobs are currently assigned to this login.</p>}<label>Quantity<input type="number" min="0.01" step="0.01" value={quantity} onChange={e=>setQuantity(e.target.value)}/></label></>}<div className="modal-actions"><button className="secondary" onClick={onClose}>Cancel</button><button className="primary" disabled={loading||Boolean(error)||!selected||!jobId||saving} onClick={save}>{saving?"Adding…":"Add to job"}</button></div></div></div>;
 }
 
 function App() {
@@ -213,6 +277,7 @@ function App() {
   const toolRefreshSequence = useRef(0);
   const inventoryRefreshSequence = useRef(0);
   const jobPackProcessorBusy = useRef(false);
+  const [scannedStockId,setScannedStockId]=useState(()=>{try{return new URLSearchParams(window.location.search).get("stock")||"";}catch{return "";}});
   dataRef.current = data;
   const [view, setView] = useState("admin");
   const [adminTab, setAdminTab] = useState("schedule");
@@ -1965,6 +2030,11 @@ Reply: ${messageText}` };
     cleanAuthUrl();
   }
 
+  function closeScannedStock(){
+    try{const url=new URL(window.location.href);url.searchParams.delete("stock");window.history.replaceState({},"",url.toString());}catch{}
+    setScannedStockId("");
+  }
+
   const topButtons = (
     <div className="actions top-menu">
       {currentUser && <span className="current-user-pill">{currentUser.email} · {profileLoading ? "checking role" : currentRole}</span>}
@@ -2075,6 +2145,7 @@ Reply: ${messageText}` };
         />
       )}
 
+      {currentUser && scannedStockId && <ScannedStockIssueModal stockId={scannedStockId} jobs={data.jobs} worker={linkedCurrentWorker} hasStoresPermission={hasStoresPermission} onClose={closeScannedStock} onSaved={hasStoresPermission?refreshInventoryData:undefined} />}
       {editingJob && <JobModal job={editingJob} teamMembers={data.teamMembers} tradeOptions={tradeOptions} siteOptions={siteOptions} tagOptions={tagOptions} onCreateTag={async(name)=>{await saveReferenceValueToSupabase("tag",name);await refreshReferenceData();}} isAdmin={isAdminUser} currentUser={currentUser} actorName={currentActorName} messages={data.messages} machines={machinery} machineryBookings={machineryBookings} inventoryItems={inventoryItems} inventoryLocations={inventoryLocations} inventoryMovements={inventoryMovements} onInventoryRefresh={refreshInventoryData} onClose={()=>setEditingJob(null)} onSave={saveJob} onSendMessage={sendDemoMessage} onActionMessage={markMessageActioned} onReplyMessage={replyToMessage} />}
       {machinerySettingsOpen && isAdminUser && <MachinerySettingsModal machines={machinery} onClose={()=>setMachinerySettingsOpen(false)} onSave={async(items)=>{try{await saveMachineryToSupabase(items);await refreshMachineryData();setMachinerySettingsOpen(false);}catch(err){alert(err.message||"Could not save machinery");}}} />}
       {machineryBookingOpen && isAdminUser && <MachineryBookingModal context={machineryBookingOpen} machines={machinery} bookings={machineryBookings} jobs={data.jobs} workers={data.teamMembers} onClose={()=>setMachineryBookingOpen(null)} onSave={async(booking)=>{try{await saveMachineryBookingToSupabase(booking);await refreshMachineryData();setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not save machinery booking");}}} onDelete={async(id)=>{if(!confirm("Delete this machinery booking?"))return;try{await deleteMachineryBookingFromSupabase(id);await refreshMachineryData();setMachineryBookingOpen(null);}catch(err){alert(err.message||"Could not delete machinery booking");}}} />}
@@ -3515,9 +3586,10 @@ function InventoryPage({ items, locations, movements, jobs, workers = [], isAdmi
   const [editing,setEditing]=useState(null);
   const [movementItem,setMovementItem]=useState(null);
   const [manageOpen,setManageOpen]=useState(false);
+  const [labelOpen,setLabelOpen]=useState(false);
   const balances=useMemo(()=>calculateInventoryBalances(items,movements),[items,movements]);
   const filtered=items.filter(item=>{if(item.active===false)return false;const q=query.toLowerCase();const balance=balances[item.id]||0;return (!lowOnly||balance<=Number(item.minimumQuantity||0))&&[item.itemNumber,item.name,item.description,item.category,item.brand,item.supplierName,item.barcode].some(v=>String(v||"").toLowerCase().includes(q));});
-  return <main className="inventory-page"><section className="inventory-shell"><div className="inventory-header"><div><h1><Forklift size={28}/> Inventory Management</h1><p>Stock register, job allocations, reorder levels and QR-ready item records.</p></div><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div><div className="inventory-toolbar"><div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search item, SKU, supplier, category, barcode..."/></div><label className="inline-check"><input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/>Low stock only</label><button className="primary" onClick={()=>setManageOpen(true)}><Settings size={16}/> Manage inventory</button></div><div className="inventory-summary"><article><strong>{items.filter(i=>i.active!==false).length}</strong><span>Active items</span></article><article><strong>{items.filter(i=>i.active!==false&&(balances[i.id]||0)<=Number(i.minimumQuantity||0)).length}</strong><span>At/below minimum</span></article><article><strong>${items.filter(i=>i.active!==false).reduce((sum,i)=>sum+(balances[i.id]||0)*Number(i.averageCost||i.unitCost||0),0).toFixed(2)}</strong><span>Stock value</span></article></div><div className="inventory-table-wrap"><table className="inventory-table"><thead><tr><th>Item</th><th>Location</th><th>Available</th><th>Minimum</th><th>Unit cost</th><th>Value</th><th>QR</th><th></th></tr></thead><tbody>{filtered.map(item=>{const qty=balances[item.id]||0;const low=qty<=Number(item.minimumQuantity||0);const location=locations.find(l=>l.id===item.defaultLocationId);return <tr key={item.id} className={low?"low-stock-row":""}><td><button className="inventory-item-link" onClick={()=>setEditing(item)}>{item.itemNumber} · {item.name}</button><small>{item.category||item.brand||"Uncategorised"}</small></td><td>{location?.name||item.defaultLocationName||"Not set"}</td><td>{qty} {item.unitOfMeasure}</td><td>{item.minimumQuantity||0}</td><td>${Number(item.averageCost||item.unitCost||0).toFixed(2)}</td><td>${(qty*Number(item.averageCost||item.unitCost||0)).toFixed(2)}</td><td><span className="qr-provision"><QrCode size={18}/>{item.qrCode||item.itemNumber}</span></td><td><button className="secondary" onClick={()=>setMovementItem(item)}><PackagePlus size={15}/> Stock movement</button></td></tr>})}</tbody></table>{!filtered.length&&<div className="empty">No inventory items match the current filters.</div>}</div></section>{editing&&<InventoryItemModal item={editing} locations={locations} movements={movements} jobs={jobs} workers={workers} currentUser={currentUser} isAdmin={true} onClose={()=>setEditing(null)} onSaved={async()=>{setEditing(null);await onRefresh();}}/>}{movementItem&&<InventoryMovementModal item={movementItem} locations={locations} jobs={jobs} currentUser={currentUser} onClose={()=>setMovementItem(null)} onSaved={async()=>{setMovementItem(null);await onRefresh();}}/>}{manageOpen&&<ManageInventoryModal items={items} locations={locations} movements={movements} jobs={jobs} workers={workers} currentUser={currentUser} onClose={()=>setManageOpen(false)} onRefresh={onRefresh}/>}</main>;
+  return <main className="inventory-page"><section className="inventory-shell"><div className="inventory-header"><div><h1><Forklift size={28}/> Inventory Management</h1><p>Stock register, job allocations, reorder levels and QR-ready item records.</p></div><button className="secondary" onClick={onClose}><ChevronLeft size={17}/> Back</button></div><div className="inventory-toolbar"><div className="search"><Search size={16}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder="Search item, SKU, supplier, category, barcode..."/></div><label className="inline-check"><input type="checkbox" checked={lowOnly} onChange={e=>setLowOnly(e.target.checked)}/>Low stock only</label><button className="secondary" onClick={()=>setLabelOpen(true)}><QrCode size={16}/> Print QR labels</button><button className="primary" onClick={()=>setManageOpen(true)}><Settings size={16}/> Manage inventory</button></div><div className="inventory-summary"><article><strong>{items.filter(i=>i.active!==false).length}</strong><span>Active items</span></article><article><strong>{items.filter(i=>i.active!==false&&(balances[i.id]||0)<=Number(i.minimumQuantity||0)).length}</strong><span>At/below minimum</span></article><article><strong>${items.filter(i=>i.active!==false).reduce((sum,i)=>sum+(balances[i.id]||0)*Number(i.averageCost||i.unitCost||0),0).toFixed(2)}</strong><span>Stock value</span></article></div><div className="inventory-table-wrap"><table className="inventory-table"><thead><tr><th>Item</th><th>Location</th><th>Available</th><th>Minimum</th><th>Unit cost</th><th>Value</th><th>QR</th><th></th></tr></thead><tbody>{filtered.map(item=>{const qty=balances[item.id]||0;const low=qty<=Number(item.minimumQuantity||0);const location=locations.find(l=>l.id===item.defaultLocationId);return <tr key={item.id} className={low?"low-stock-row":""}><td><button className="inventory-item-link" onClick={()=>setEditing(item)}>{item.itemNumber} · {item.name}</button><small>{item.category||item.brand||"Uncategorised"}</small></td><td>{location?.name||item.defaultLocationName||"Not set"}</td><td>{qty} {item.unitOfMeasure}</td><td>{item.minimumQuantity||0}</td><td>${Number(item.averageCost||item.unitCost||0).toFixed(2)}</td><td>${(qty*Number(item.averageCost||item.unitCost||0)).toFixed(2)}</td><td><span className="qr-provision"><QrCode size={18}/>{item.qrCode||item.itemNumber}</span></td><td><button className="secondary" onClick={()=>setMovementItem(item)}><PackagePlus size={15}/> Stock movement</button></td></tr>})}</tbody></table>{!filtered.length&&<div className="empty">No inventory items match the current filters.</div>}</div></section>{editing&&<InventoryItemModal item={editing} locations={locations} movements={movements} jobs={jobs} workers={workers} currentUser={currentUser} isAdmin={true} onClose={()=>setEditing(null)} onSaved={async()=>{setEditing(null);await onRefresh();}}/>}{movementItem&&<InventoryMovementModal item={movementItem} locations={locations} jobs={jobs} currentUser={currentUser} onClose={()=>setMovementItem(null)} onSaved={async()=>{setMovementItem(null);await onRefresh();}}/>}{manageOpen&&<ManageInventoryModal items={items} locations={locations} movements={movements} jobs={jobs} workers={workers} currentUser={currentUser} onClose={()=>setManageOpen(false)} onRefresh={onRefresh}/>} {labelOpen&&<InventoryLabelPrintModal items={items} locations={locations} onClose={()=>setLabelOpen(false)}/>}</main>;
 }
 
 function downloadInventoryTemplate(){
@@ -3542,11 +3614,11 @@ function InventoryItemModal({item,locations,movements=[],jobs=[],workers=[],curr
   const history=movements.filter(m=>m.itemId===item.id).sort((a,b)=>String(b.createdAt).localeCompare(String(a.createdAt)));
   async function save(e){e.preventDefault();if(!form.itemNumber.trim()||!form.name.trim()){alert("Item number and name are required.");return;}await saveInventoryItemToSupabase(form);await onSaved();}
   async function removeItem(){if(!item.id||!isAdmin)return;const hasHistory=history.length>0;const message=hasHistory?"Archive this material? It has stock history, so the record will be retained for audit purposes and removed from active stock lists.":"Delete this unused material from stock? This cannot be undone.";if(!confirm(message))return;await deleteOrArchiveInventoryItemFromSupabase(item,{hasHistory,actorId:currentUser?.id});await onSaved();}
-  return <div className="modal-backdrop"><form className="modal inventory-item-modal tool-detail-modal" onSubmit={save}><div className="modal-header"><div><h2>{item.id?`${item.itemNumber} · ${item.name}`:"Add inventory item"}</h2><p>QR code value defaults to the item number and can later be printed as a label.</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div>
+  return <div className="modal-backdrop"><form className="modal inventory-item-modal tool-detail-modal" onSubmit={save}><div className="modal-header"><div><h2>{item.id?`${item.itemNumber} · ${item.name}`:"Add inventory item"}</h2><p>Print a permanent QR label for this material or edit its inventory details.</p></div><button type="button" className="icon" onClick={onClose}><X size={18}/></button></div>
     <div className="tool-detail-tabs"><button type="button" className={tab==="edit"?"active":""} onClick={()=>setTab("edit")}>Edit</button>{item.id&&<button type="button" className={tab==="history"?"active":""} onClick={()=>setTab("history")}>Item history <span>{history.length}</span></button>}</div>
     {tab==="edit"?<div className="tool-detail-body"><div className="two-col"><label>Item number<input value={form.itemNumber} onChange={e=>update("itemNumber",e.target.value)}/></label><label>Item name<input value={form.name} onChange={e=>update("name",e.target.value)}/></label></div><label>Description<textarea rows="2" value={form.description} onChange={e=>update("description",e.target.value)}/></label><div className="two-col"><label>Category<input value={form.category} onChange={e=>update("category",e.target.value)}/></label><label>Brand<input value={form.brand} onChange={e=>update("brand",e.target.value)}/></label></div><div className="two-col"><label>Supplier<input value={form.supplierName} onChange={e=>update("supplierName",e.target.value)}/></label><label>Supplier item number<input value={form.supplierItemNumber} onChange={e=>update("supplierItemNumber",e.target.value)}/></label></div><div className="two-col"><label>Unit<select value={form.unitOfMeasure} onChange={e=>update("unitOfMeasure",e.target.value)}><option>each</option><option>box</option><option>metre</option><option>litre</option><option>roll</option><option>pack</option><option>sheet</option></select></label><label>Default location<select value={form.defaultLocationId} onChange={e=>update("defaultLocationId",e.target.value)}><option value="">Not set</option>{locations.map(l=><option key={l.id} value={l.id}>{l.name}</option>)}</select></label></div><div className="three-col"><label>Unit cost<input type="number" min="0" step="0.01" value={form.unitCost} onChange={e=>update("unitCost",e.target.value)}/></label><label>Minimum quantity<input type="number" min="0" step="0.01" value={form.minimumQuantity} onChange={e=>update("minimumQuantity",e.target.value)}/></label><label>Reorder quantity<input type="number" min="0" step="0.01" value={form.reorderQuantity} onChange={e=>update("reorderQuantity",e.target.value)}/></label></div><div className="two-col"><label>Barcode<input value={form.barcode} onChange={e=>update("barcode",e.target.value)}/></label><label>QR code value<input value={form.qrCode} onChange={e=>update("qrCode",e.target.value)}/></label></div><label>Notes<textarea rows="2" value={form.notes} onChange={e=>update("notes",e.target.value)}/></label><label className="inline-check"><input type="checkbox" checked={form.active} onChange={e=>update("active",e.target.checked)}/>Active inventory item</label></div>:
     <div className="tool-detail-history history-list inventory-history-list">{history.map(m=>{const location=locations.find(l=>l.id===m.locationId);const job=jobs.find(j=>j.id===m.jobId);const actor=resolveInventoryMovementActor(m,workers);return <div key={m.id}><strong>{inventoryMovementLabel(m.movementType)} · {formatInventorySignedQuantity(m)}</strong><span>{formatDateTime(m.createdAt)} · {location?.name||"No location"}</span><p>{job?`Job: ${job.jobNumber||job.workOrderNumber||""} ${job.title}`.trim():"No job linked"}</p><p>Performed by: {actor}</p>{m.reference&&<p>Reference: {m.reference}</p>}{m.notes&&<p>{m.notes}</p>}</div>})}{!history.length&&<div className="empty">No item movements have been recorded.</div>}</div>}
-    <div className="modal-actions">{item.id&&isAdmin&&<button type="button" className="danger" onClick={removeItem}><Trash2 size={14}/> {history.length?"Archive material":"Delete material"}</button>}<span className="modal-action-spacer"/><button type="button" className="secondary" onClick={onClose}>Cancel</button>{tab==="edit"&&<button className="primary" disabled={!isAdmin}>Save item</button>}</div></form></div>
+    <div className="modal-actions">{item.id&&isAdmin&&<button type="button" className="secondary" onClick={()=>printInventoryLabels([form],locations)}><QrCode size={14}/> Print label</button>}{item.id&&isAdmin&&<button type="button" className="danger" onClick={removeItem}><Trash2 size={14}/> {history.length?"Archive material":"Delete material"}</button>}<span className="modal-action-spacer"/><button type="button" className="secondary" onClick={onClose}>Cancel</button>{tab==="edit"&&<button className="primary" disabled={!isAdmin}>Save item</button>}</div></form></div>
 }
 
 function InventoryMovementModal({item,locations,jobs,currentUser,onClose,onSaved}){
@@ -3632,11 +3704,11 @@ async function fetchTradeJobMaterialsFromSupabase(jobId){
   }
   return (data||[]).map(r=>({itemId:r.item_id,itemNumber:r.item_number||"",itemName:r.item_name||"",unitOfMeasure:r.unit_of_measure||"each",locationId:r.location_id,locationName:r.location_name||"",netQuantity:Number(r.net_quantity)||0}));
 }
-async function issueTradeInventoryToJob({jobId,itemId,locationId,quantity}){
+async function issueTradeInventoryToJob({jobId,itemId,locationId,quantity,source="manual"}){
   if(!supabase)throw new Error("Supabase is not configured.");
-  const {error}=await supabase.rpc("aimcg_trade_issue_inventory",{p_job_id:jobId,p_item_id:itemId,p_location_id:locationId,p_quantity:Number(quantity)});
+  const {error}=await supabase.rpc("aimcg_trade_issue_inventory",{p_job_id:jobId,p_item_id:itemId,p_location_id:locationId,p_quantity:Number(quantity),p_source:source});
   if(error){
-    if(["42883","PGRST202","PGRST205"].includes(error.code)||/aimcg_trade_issue_inventory|function.*not found/i.test(error.message||"")) throw new Error("Run SUPABASE_MIGRATION_v51e_TAG_LINKS_TRADE_INVENTORY.sql before using Trade materials.");
+    if(["42883","PGRST202","PGRST205"].includes(error.code)||/aimcg_trade_issue_inventory|function.*not found/i.test(error.message||"")) throw new Error("Run SUPABASE_MIGRATION_v52_QR_INVENTORY.sql before using v52 QR/material issuing.");
     throw error;
   }
 }
