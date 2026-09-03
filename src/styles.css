@@ -1943,3 +1943,13 @@ body:has(.modal-backdrop) .calendar-side-arrow{visibility:hidden!important;point
   .machinery-calendar-grid .day-header strong{font-size:14px}
   .machinery-calendar-grid .day-header span{font-size:11px}
 }
+
+
+/* v53a: Warehouse job operational view */
+.warehouse-job-readonly { display: grid; gap: 14px; }
+.warehouse-job-summary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.warehouse-job-summary-grid > div { border: 1px solid var(--border, #d9dee7); border-radius: 10px; padding: 10px 12px; background: #f8fafc; display: grid; gap: 3px; }
+.warehouse-job-summary-grid span { font-size: 12px; color: #667085; }
+.warehouse-job-summary-grid strong { overflow-wrap: anywhere; }
+.warehouse-job-readonly input[readonly], .warehouse-job-readonly textarea[readonly] { background: #f8fafc; color: inherit; }
+@media (max-width: 700px) { .warehouse-job-summary-grid { grid-template-columns: 1fr; } }
