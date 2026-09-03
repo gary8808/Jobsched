@@ -1915,3 +1915,31 @@ body:has(.modal-backdrop) .calendar-side-arrow{visibility:hidden!important;point
 
 /* v52a live QR scanner and scanned-item job search */
 .live-qr-start{justify-self:start;display:inline-flex;align-items:center;gap:7px}.live-qr-scanner{display:grid;gap:9px}.live-qr-video-wrap{position:relative;overflow:hidden;border-radius:12px;background:#111;aspect-ratio:4/3;max-height:48vh}.live-qr-video-wrap video{display:block;width:100%;height:100%;object-fit:cover}.live-qr-guide{position:absolute;inset:0;display:grid;place-items:center;pointer-events:none}.live-qr-guide span{width:min(58%,240px);aspect-ratio:1;border:3px solid rgba(255,255,255,.92);border-radius:16px;box-shadow:0 0 0 999px rgba(0,0,0,.22)}.live-qr-canvas{display:none}.scanned-job-results{max-height:250px}.scanned-job-results button small{min-height:1em}.scanned-stock-backdrop .job-search-picker{margin:8px 0 12px}@media(max-width:700px){.live-qr-video-wrap{max-height:42vh}.live-qr-start{width:100%;justify-content:center}.scanned-job-results{max-height:210px}}
+
+/* v52b mobile machinery layout */
+.machinery-calendar-grid .machine-cell{min-height:118px;display:grid;justify-content:stretch;align-content:start;gap:4px}
+.machinery-calendar-grid .machine-cell .machine-name-link{line-height:1.18}
+.machine-asset-line{display:block;font-weight:800;color:#495466!important}
+.machine-location-line{display:block;color:#687385!important}
+
+@media(max-width:760px){
+  .machinery-page .inventory-shell{padding:8px}
+  .machinery-page-header{display:block;margin-bottom:10px}
+  .machinery-page-header>div:first-child p{display:none}
+  .machinery-page-header .machinery-toolbar-actions{display:grid;width:100%;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px;margin-top:9px}
+  .machinery-page-header .machinery-toolbar-actions button{width:100%;min-height:40px;padding:7px 8px;border-radius:10px;font-size:.84rem;line-height:1.1;white-space:normal}
+  .machinery-page-header .machinery-back-button{grid-column:1/-1;min-height:36px!important}
+  .machinery-calendar-grid{grid-template-columns:118px repeat(var(--day-count),minmax(138px,138px))!important}
+  .machinery-calendar-grid .machine-cell{min-height:112px;padding:8px 7px;gap:3px}
+  .machinery-calendar-grid .machine-cell .machine-name-link{font-size:.86rem;overflow-wrap:anywhere}
+  .machinery-calendar-grid .machine-cell span,.machinery-calendar-grid .machine-cell em{font-size:.72rem;line-height:1.15}
+  .machinery-day-cell{min-height:112px}
+  .machinery-period{grid-template-columns:22px 1fr;padding:3px;gap:3px}
+  .machinery-period>span{font-size:9px}
+  .machine-booking{padding:4px 5px}
+  .machine-booking strong{font-size:10px}
+  .machine-booking span{font-size:9px}
+  .machinery-calendar-grid .corner-cell,.machinery-calendar-grid .day-header{padding:8px;min-height:54px}
+  .machinery-calendar-grid .day-header strong{font-size:14px}
+  .machinery-calendar-grid .day-header span{font-size:11px}
+}

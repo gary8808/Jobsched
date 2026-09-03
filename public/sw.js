@@ -1,4 +1,4 @@
-const CACHE_NAME = "aim-cg-v52a";
+const CACHE_NAME = "aim-cg-v52b";
 const APP_SHELL = ["./", "./manifest.webmanifest", "./aim-logo.png", "./icons/icon-192.png", "./icons/icon-512.png"];
 
 self.addEventListener("install", event => {
