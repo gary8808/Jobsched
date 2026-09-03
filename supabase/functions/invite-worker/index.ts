@@ -56,7 +56,7 @@ serve(async (req) => {
     const email = String(body.email || "").trim().toLowerCase();
     const fullName = String(body.full_name || email).trim();
     const workerId = String(body.worker_id || "").trim();
-    const role = body.role === "admin" ? "admin" : "employee";
+    const role = body.role === "admin" ? "admin" : body.role === "warehouse" ? "warehouse" : "employee";
     const redirectTo = String(body.redirect_to || "").trim() || undefined;
 
     if (!email || !workerId) {

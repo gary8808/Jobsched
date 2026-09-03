@@ -1,3 +1,7 @@
+# AIM Jobsched v53
+
+See `BUILD_NOTES_v53.md` and `V53_DEPLOYMENT_STEPS.md` for this release.
+
 AIM CG v42 – Machinery Scheduling
 
 See BUILD_NOTES_v42_MACHINERY.md for deployment instructions.
